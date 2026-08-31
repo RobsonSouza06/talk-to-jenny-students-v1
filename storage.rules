@@ -1,0 +1,72 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return firestore.get(
+        /databases/(default)/documents/users/$(request.auth.uid)
+      ).data;
+    }
+
+    function isTeacher() {
+      let user = userProfile();
+      return signedIn()
+        && user.active == true
+        && user.role == "teacher";
+    }
+
+    function studentProfile() {
+      return firestore.get(
+        /databases/(default)/documents/students/$(request.auth.uid)
+      ).data;
+    }
+
+    function bookData(bookId) {
+      return firestore.get(
+        /databases/(default)/documents/books/$(bookId)
+      ).data;
+    }
+
+    function lessonData(bookId, lessonId) {
+      return firestore.get(
+        /databases/(default)/documents/books/$(bookId)/lessons/$(lessonId)
+      ).data;
+    }
+
+    function canReadLessonAudio(bookId, lessonId) {
+      let user = userProfile();
+      let student = studentProfile();
+      let book = bookData(bookId);
+      let lesson = lessonData(bookId, lessonId);
+      return signedIn()
+        && user.active == true
+        && user.role == "student"
+        && student.active == true
+        && book.published == true
+        && lesson.published == true
+        && (
+          book.order < student.currentBook
+          || (
+            book.order == student.currentBook
+            && lesson.order <= student.currentLesson
+          )
+        );
+    }
+
+    match /lesson-audio/{bookId}/{lessonId}/{fileName} {
+      allow read: if isTeacher() || canReadLessonAudio(bookId, lessonId);
+      allow create, update: if isTeacher()
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches("audio/.*");
+      allow delete: if isTeacher();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

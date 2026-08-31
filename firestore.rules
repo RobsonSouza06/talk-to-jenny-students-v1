@@ -1,0 +1,195 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath(userId) {
+      return /databases/$(database)/documents/users/$(userId);
+    }
+
+    function hasActiveUser() {
+      return signedIn()
+        && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.active == true;
+    }
+
+    function isTeacher() {
+      return hasActiveUser()
+        && get(userPath(request.auth.uid)).data.role == "teacher";
+    }
+
+    function isStudentAccount(studentId) {
+      return hasActiveUser()
+        && request.auth.uid == studentId
+        && get(userPath(request.auth.uid)).data.role == "student";
+    }
+
+    function studentPath(studentId) {
+      return /databases/$(database)/documents/students/$(studentId);
+    }
+
+    function hasActiveStudentProfile(studentId) {
+      return isStudentAccount(studentId)
+        && exists(studentPath(studentId))
+        && get(studentPath(studentId)).data.active == true;
+    }
+
+    function bookPath(bookId) {
+      return /databases/$(database)/documents/books/$(bookId);
+    }
+
+    function lessonPath(bookId, lessonId) {
+      return /databases/$(database)/documents/books/$(bookId)/lessons/$(lessonId);
+    }
+
+    function canReadBookData(book) {
+      return hasActiveStudentProfile(request.auth.uid)
+        && book.published == true
+        && book.order <= get(studentPath(request.auth.uid)).data.currentBook;
+    }
+
+    function canReadLessonData(bookId, lesson) {
+      return hasActiveStudentProfile(request.auth.uid)
+        && get(bookPath(bookId)).data.published == true
+        && lesson.published == true
+        && (
+          get(bookPath(bookId)).data.order
+            < get(studentPath(request.auth.uid)).data.currentBook
+          || (
+            get(bookPath(bookId)).data.order
+              == get(studentPath(request.auth.uid)).data.currentBook
+            && lesson.order
+              <= get(studentPath(request.auth.uid)).data.currentLesson
+          )
+        );
+    }
+
+    function canReadLessonById(bookId, lessonId) {
+      return canReadLessonData(
+        bookId,
+        get(lessonPath(bookId, lessonId)).data
+      );
+    }
+
+    match /users/{userId} {
+      allow get: if isTeacher()
+        || (signedIn() && request.auth.uid == userId);
+      allow list: if isTeacher();
+      allow create: if isTeacher()
+        && userId != request.auth.uid
+        && request.resource.data.role == "student"
+        && request.resource.data.active == true;
+      allow update: if isTeacher()
+        && resource.data.role == "student"
+        && request.resource.data.role == "student";
+      allow delete: if isTeacher()
+        && resource.data.role == "student";
+    }
+
+    match /students/{studentId} {
+      allow get: if isTeacher() || hasActiveStudentProfile(studentId);
+      allow list: if isTeacher();
+      allow create, delete: if isTeacher();
+      allow update: if isTeacher()
+        || (
+          hasActiveStudentProfile(studentId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "lastAccess",
+            "updatedAt"
+          ])
+        );
+
+      match /attempts/{attemptId} {
+        allow read: if isTeacher() || hasActiveStudentProfile(studentId);
+        allow create: if hasActiveStudentProfile(studentId)
+          && request.resource.data.keys().hasOnly([
+            "studentId",
+            "bookId",
+            "lessonId",
+            "questionId",
+            "answer",
+            "revealed",
+            "createdAt",
+            "updatedAt",
+            "revealedAt"
+          ])
+          && request.resource.data.keys().hasAll([
+            "studentId",
+            "bookId",
+            "lessonId",
+            "questionId",
+            "answer",
+            "revealed"
+          ])
+          && request.resource.data.studentId == studentId
+          && request.resource.data.bookId is string
+          && request.resource.data.lessonId is string
+          && request.resource.data.questionId is string
+          && request.resource.data.revealed is bool
+          && attemptId == request.resource.data.bookId
+            + "__" + request.resource.data.lessonId
+            + "__" + request.resource.data.questionId
+          && canReadLessonById(
+            request.resource.data.bookId,
+            request.resource.data.lessonId
+          )
+          && request.resource.data.answer is string
+          && request.resource.data.answer.size() <= 5000;
+        allow update: if hasActiveStudentProfile(studentId)
+          && request.resource.data.studentId == resource.data.studentId
+          && request.resource.data.bookId == resource.data.bookId
+          && request.resource.data.lessonId == resource.data.lessonId
+          && request.resource.data.questionId == resource.data.questionId
+          && attemptId == request.resource.data.bookId
+            + "__" + request.resource.data.lessonId
+            + "__" + request.resource.data.questionId
+          && canReadLessonById(
+            request.resource.data.bookId,
+            request.resource.data.lessonId
+          )
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "answer",
+            "revealed",
+            "updatedAt",
+            "revealedAt"
+          ])
+          && request.resource.data.revealed is bool
+          && request.resource.data.answer is string
+          && request.resource.data.answer.size() <= 5000;
+        allow delete: if isTeacher();
+      }
+    }
+
+    match /books/{bookId} {
+      allow read: if isTeacher() || canReadBookData(resource.data);
+      allow create, update, delete: if isTeacher();
+
+      match /lessons/{lessonId} {
+        allow read: if isTeacher() || canReadLessonData(bookId, resource.data);
+        allow create, update, delete: if isTeacher();
+
+        match /homework/{questionId} {
+          allow read: if isTeacher() || canReadLessonById(bookId, lessonId);
+          allow create, update, delete: if isTeacher();
+        }
+
+        match /audio/{audioId} {
+          allow read: if isTeacher() || canReadLessonById(bookId, lessonId);
+          allow create, update, delete: if isTeacher();
+        }
+      }
+    }
+
+    match /auditLogs/{logId} {
+      allow read, create: if isTeacher();
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
