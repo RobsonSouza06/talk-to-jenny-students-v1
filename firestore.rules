@@ -181,6 +181,11 @@ service cloud.firestore {
           allow create, update, delete: if isTeacher();
         }
       }
+
+      // Material exclusivo da professora fica fora do documento público da lição.
+      match /teacherLessons/{lessonId} {
+        allow read, create, update, delete: if isTeacher();
+      }
     }
 
     match /auditLogs/{logId} {

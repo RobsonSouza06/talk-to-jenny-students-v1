@@ -7,8 +7,6 @@ import {
 } from "firebase/auth";
 import {
   collection,
-  collectionGroup,
-  deleteDoc,
   doc,
   getCountFromServer,
   getDoc,
@@ -28,6 +26,7 @@ import {
 import {
   type BookSummary,
   type HomeworkQuestion,
+  type LearningSection,
   type LessonSummary,
   type Student,
 } from "@/app/demo-data";
@@ -186,10 +185,26 @@ async function loadBooksForTeacher() {
 async function loadLessonsForTeacher(books: BookSummary[]) {
   const groups = await Promise.all(
     books.map(async (book) => {
-      const snapshot = await getDocs(
-        collection(firebaseDb(), "books", book.id, "lessons"),
+      const [snapshot, teacherSnapshot] = await Promise.all([
+        getDocs(collection(firebaseDb(), "books", book.id, "lessons")),
+        getDocs(collection(firebaseDb(), "books", book.id, "teacherLessons")),
+      ]);
+      const teacherContent = new Map(
+        teacherSnapshot.docs.map((item) => [
+          item.id,
+          teacherSectionsFromSnapshot(item.data()),
+        ]),
       );
-      return snapshot.docs.map((item) => lessonFromSnapshot(book.id, item));
+      return snapshot.docs.map((item) => {
+        const lesson = lessonFromSnapshot(book.id, item);
+        return {
+          ...lesson,
+          content: mergeTeacherSections(
+            lesson.content ?? [],
+            teacherContent.get(item.id) ?? [],
+          ),
+        };
+      });
     }),
   );
   return groups.flat().sort(byBookAndOrder);
@@ -228,18 +243,31 @@ export async function saveBook(book: BookSummary) {
 }
 
 export async function saveLesson(lesson: LessonSummary) {
-  await setDoc(
-    doc(firebaseDb(), "books", lesson.bookId, "lessons", lesson.id),
-    {
-      ...clean(lesson),
-      published: lesson.status === "published",
-      content: clean(lesson.content ?? []),
-      homework: clean(lesson.homework ?? []),
-      homeworkCount: lesson.homework?.length ?? lesson.homeworkCount,
-      updatedAt: serverTimestamp(),
-    },
+  const db = firebaseDb();
+  const batch = writeBatch(db);
+  const { lessonData, teacherContent } = lessonWriteData(lesson);
+  batch.set(
+    doc(db, "books", lesson.bookId, "lessons", lesson.id),
+    lessonData,
     { merge: true },
   );
+  const teacherReference = doc(
+    db,
+    "books",
+    lesson.bookId,
+    "teacherLessons",
+    lesson.id,
+  );
+  if (teacherContent.length > 0) {
+    batch.set(
+      teacherReference,
+      { content: clean(teacherContent), updatedAt: serverTimestamp() },
+      { merge: true },
+    );
+  } else {
+    batch.delete(teacherReference);
+  }
+  await batch.commit();
   await syncBookLessonCount(lesson.bookId);
 }
 
@@ -253,19 +281,23 @@ export async function moveLesson(
   }
   const db = firebaseDb();
   const batch = writeBatch(db);
+  const { lessonData, teacherContent } = lessonWriteData(lesson);
   batch.set(
     doc(db, "books", lesson.bookId, "lessons", lesson.id),
-    {
-      ...clean(lesson),
-      published: lesson.status === "published",
-      content: clean(lesson.content ?? []),
-      homework: clean(lesson.homework ?? []),
-      homeworkCount: lesson.homework?.length ?? lesson.homeworkCount,
-      updatedAt: serverTimestamp(),
-    },
+    lessonData,
     { merge: true },
   );
+  if (teacherContent.length > 0) {
+    batch.set(
+      doc(db, "books", lesson.bookId, "teacherLessons", lesson.id),
+      { content: clean(teacherContent), updatedAt: serverTimestamp() },
+      { merge: true },
+    );
+  } else {
+    batch.delete(doc(db, "books", lesson.bookId, "teacherLessons", lesson.id));
+  }
   batch.delete(doc(db, "books", previousBookId, "lessons", lesson.id));
+  batch.delete(doc(db, "books", previousBookId, "teacherLessons", lesson.id));
   await batch.commit();
   await Promise.all([
     syncBookLessonCount(previousBookId),
@@ -411,11 +443,14 @@ export async function deleteLessonPermanently(
   bookId: string,
   lessonId: string,
 ) {
-  const attempts = await getDocs(
-    query(collectionGroup(firebaseDb(), "attempts"), where("lessonId", "==", lessonId)),
+  await deleteMatchingAttempts(
+    (data) => data.bookId === bookId && data.lessonId === lessonId,
   );
-  await deleteSnapshots(attempts.docs);
-  await deleteDoc(doc(firebaseDb(), "books", bookId, "lessons", lessonId));
+  const db = firebaseDb();
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "books", bookId, "lessons", lessonId));
+  batch.delete(doc(db, "books", bookId, "teacherLessons", lessonId));
+  await batch.commit();
   await syncBookLessonCount(bookId);
 }
 
@@ -426,34 +461,48 @@ export async function deleteHomeworkQuestionPermanently(
   const homework = (lesson.homework ?? []).filter(
     (question) => question.id !== questionId,
   );
+  await deleteMatchingAttempts(
+    (data) =>
+      data.bookId === lesson.bookId
+      && data.lessonId === lesson.id
+      && data.questionId === questionId,
+  );
   await saveLesson({
     ...lesson,
     homework,
     homeworkCount: homework.length,
   });
-
-  const attempts = await getDocs(
-    query(
-      collectionGroup(firebaseDb(), "attempts"),
-      where("questionId", "==", questionId),
-    ),
-  );
-  const matchingAttempts = attempts.docs.filter((attempt) => {
-    const data = attempt.data();
-    return data.bookId === lesson.bookId && data.lessonId === lesson.id;
-  });
-  await deleteSnapshots(matchingAttempts);
 }
 
 export async function deleteBookPermanently(bookId: string) {
   const db = firebaseDb();
-  const [lessons, attempts] = await Promise.all([
+  const [lessons, teacherLessons] = await Promise.all([
     getDocs(collection(db, "books", bookId, "lessons")),
-    getDocs(query(collectionGroup(db, "attempts"), where("bookId", "==", bookId))),
+    getDocs(collection(db, "books", bookId, "teacherLessons")),
   ]);
-  await deleteSnapshots(attempts.docs);
+  await deleteMatchingAttempts((data) => data.bookId === bookId);
   await deleteSnapshots(lessons.docs);
-  await deleteDoc(doc(db, "books", bookId));
+  await deleteSnapshots(teacherLessons.docs);
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "books", bookId));
+  await batch.commit();
+}
+
+async function deleteMatchingAttempts(
+  matches: (data: DocumentData) => boolean,
+) {
+  const db = firebaseDb();
+  const students = await getDocs(collection(db, "students"));
+  const groups = await Promise.all(
+    students.docs.map((student) =>
+      getDocs(collection(db, "students", student.id, "attempts")),
+    ),
+  );
+  await deleteSnapshots(
+    groups.flatMap((group) =>
+      group.docs.filter((attempt) => matches(attempt.data())),
+    ),
+  );
 }
 
 async function updateLastAccess(studentId: string) {
@@ -523,6 +572,73 @@ function queueLessonRelease(
   });
 }
 
+function lessonWriteData(lesson: LessonSummary) {
+  const content = (lesson.content ?? []).map((section, index) => ({
+    ...section,
+    audience: section.audience === "teacher" ? "teacher" as const : "student" as const,
+    order: Number.isFinite(section.order) ? section.order : index,
+  }));
+  const studentContent = content
+    .filter((section) => section.audience !== "teacher")
+    .map((section) => ({
+      id: section.id,
+      title: section.title,
+      items: section.items,
+      order: section.order,
+    }));
+  const teacherContent = content.filter(
+    (section) => section.audience === "teacher",
+  );
+  const lessonFields = {
+    id: lesson.id,
+    bookId: lesson.bookId,
+    order: lesson.order,
+    title: lesson.title,
+    subtitle: lesson.subtitle,
+    status: lesson.status,
+    homeworkCount: lesson.homeworkCount,
+    audioCount: lesson.audioCount,
+  };
+  const sections = content.length > 0
+    ? studentContent.map((section) => section.title)
+    : lesson.sections;
+  return {
+    lessonData: {
+      ...clean(lessonFields),
+      sections: clean(sections),
+      published: lesson.status === "published",
+      content: clean(studentContent),
+      homework: clean(lesson.homework ?? []),
+      homeworkCount: lesson.homework?.length ?? lesson.homeworkCount,
+      updatedAt: serverTimestamp(),
+    },
+    teacherContent,
+  };
+}
+
+function teacherSectionsFromSnapshot(data: DocumentData): LearningSection[] {
+  if (!Array.isArray(data.content)) return [];
+  return (data.content as LearningSection[]).map((section, index) => ({
+    ...section,
+    audience: "teacher",
+    order: Number.isFinite(section.order) ? section.order : index,
+  }));
+}
+
+function mergeTeacherSections(
+  studentContent: LearningSection[],
+  teacherContent: LearningSection[],
+) {
+  return [
+    ...studentContent.map((section, index) => ({
+      ...section,
+      audience: "student" as const,
+      order: Number.isFinite(section.order) ? section.order : index,
+    })),
+    ...teacherContent,
+  ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
 function lessonFromSnapshot(
   bookId: string,
   snapshot: QueryDocumentSnapshot<DocumentData, DocumentData>,
@@ -545,7 +661,13 @@ function lessonFromSnapshot(
       : [],
     homeworkCount: homework.length || Number(data.homeworkCount ?? 0),
     audioCount: Number(data.audioCount ?? 0),
-    content: Array.isArray(data.content) ? data.content : [],
+    content: Array.isArray(data.content)
+      ? (data.content as LearningSection[]).map((section, index) => ({
+          ...section,
+          audience: "student",
+          order: Number.isFinite(section.order) ? section.order : index,
+        }))
+      : [],
     homework,
   };
 }

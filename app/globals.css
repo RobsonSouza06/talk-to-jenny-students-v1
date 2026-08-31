@@ -1025,6 +1025,44 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+.lesson-mode-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+  border-radius: 0.75rem;
+  background: #f3f7fa;
+  padding: 0.55rem;
+}
+
+.lesson-mode-buttons,
+.preview-role-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.preview-role-buttons {
+  border-radius: 0.55rem;
+  background: #fff;
+  padding: 0.2rem;
+}
+
+.preview-role-buttons button {
+  border-radius: 0.42rem;
+  padding: 0.42rem 0.65rem;
+  color: #4f6d82;
+  font-size: 0.65rem;
+  font-weight: 750;
+}
+
+.preview-role-buttons button.active {
+  background: #003f70;
+  color: #fff;
+}
+
 .block-list {
   display: flex;
   flex-direction: column;
@@ -1039,6 +1077,16 @@ button:disabled {
   border: 1px solid #e1e9f0;
   border-radius: 0.72rem;
   padding: 0.7rem;
+}
+
+.content-block-row.teacher-only {
+  border-color: #e5c36e;
+  background: #fffaf0;
+}
+
+.content-block-row.teacher-only .block-icon {
+  background: #f8e9bd;
+  color: #765400;
 }
 
 .drag-number {
@@ -1148,6 +1196,11 @@ button:disabled {
 
 .editor-actions .delete-lesson {
   color: #c51620;
+}
+
+.teacher-lesson-preview {
+  margin-top: 0.15rem;
+  border: 1px solid #dce7ef;
 }
 
 .table-subtitle {
@@ -2043,6 +2096,33 @@ button:disabled {
   display: grid;
   gap: 1rem;
   padding: 1rem;
+}
+
+.learning-section.teacher-only {
+  border: 1px solid #e5c36e;
+  border-radius: 0.8rem;
+  background: #fffaf0;
+  padding: 0.85rem;
+}
+
+.teacher-only-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.55rem;
+  border-radius: 999px;
+  background: #f5df9d;
+  padding: 0.3rem 0.55rem;
+  color: #654900;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.teacher-only-label svg {
+  width: 0.75rem;
+  height: 0.75rem;
 }
 
 .learning-section h3 {

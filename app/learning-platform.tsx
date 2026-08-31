@@ -177,6 +177,27 @@ function studentAttemptState(attempts: Record<string, StudentAttempt>) {
   };
 }
 
+function lessonBlocks(lesson: LessonSummary): LearningSection[] {
+  if ((lesson.content?.length ?? 0) > 0) {
+    return (lesson.content ?? [])
+      .map((section, index) => ({
+        ...section,
+        audience: section.audience === "teacher"
+          ? "teacher" as const
+          : "student" as const,
+        order: Number.isFinite(section.order) ? section.order : index,
+      }))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }
+  return lesson.sections.map((title, index) => ({
+    id: `section-${index + 1}`,
+    title,
+    items: [],
+    audience: "student",
+    order: index,
+  }));
+}
+
 const teacherNavigation: Array<{ id: TeacherView; label: string; icon: LucideIcon }> = [
   { id: "home", label: "Início", icon: Home },
   { id: "content", label: "Conteúdo", icon: LibraryBig },
@@ -679,9 +700,9 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       toast.error("Informe o nome do bloco.");
       return;
     }
-    const sections = [...blockLesson.sections];
-    if (blockEditor.index === null) sections.push(name);
-    else sections[blockEditor.index] = name;
+    const audience = form.get("audience") === "teacher"
+      ? "teacher" as const
+      : "student" as const;
     const englishLines = String(form.get("english") ?? "").split(/\r?\n/);
     const portugueseLines = String(form.get("portuguese") ?? "").split(/\r?\n/);
     const itemCount = Math.max(englishLines.length, portugueseLines.length);
@@ -690,22 +711,24 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       portuguese: portugueseLines[index]?.trim() ?? "",
       audioText: englishLines[index]?.trim() || undefined,
     })).filter((item) => item.english || item.portuguese);
-    const content: LearningSection[] = blockLesson.sections.map(
-      (section, index) =>
-        blockLesson.content?.[index] ?? {
-          id: `section-${index + 1}`,
-          title: section,
-          items: [],
-        },
-    );
+    const content: LearningSection[] = lessonBlocks(blockLesson);
     const contentIndex = blockEditor.index ?? content.length;
     const previousContent = content[contentIndex];
     content[contentIndex] = {
-      id: previousContent?.id ?? `section-${Date.now()}`,
+      id: previousContent?.id ?? `section-${blockLesson.id}-${contentIndex + 1}`,
       title: name,
       items,
+      audience,
+      order: contentIndex,
     };
-    const updatedLesson = { ...blockLesson, sections, content };
+    const orderedContent = content.map((section, index) => ({
+      ...section,
+      order: index,
+    }));
+    const sections = orderedContent
+      .filter((section) => section.audience !== "teacher")
+      .map((section) => section.title);
+    const updatedLesson = { ...blockLesson, sections, content: orderedContent };
     try {
       await saveLesson(updatedLesson);
       setLessons((current) =>
@@ -1241,6 +1264,8 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                     setBlockEditor({ lessonId: lesson.id, index })
                   }
                   onToggleStatus={toggleLessonStatus}
+                  audioAssets={audioAssets}
+                  onPlayAudio={playAudio}
                   onDelete={(lesson) =>
                     requestDelete({
                       kind: "lesson",
@@ -1525,12 +1550,12 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
           value={
             blockEditor.index === null
               ? ""
-              : blockLesson.sections[blockEditor.index] ?? ""
+              : lessonBlocks(blockLesson)[blockEditor.index]?.title ?? ""
           }
           section={
             blockEditor.index === null
               ? undefined
-              : blockLesson.content?.[blockEditor.index]
+              : lessonBlocks(blockLesson)[blockEditor.index]
           }
           onSubmit={saveBlock}
         />
@@ -1905,6 +1930,8 @@ function TeacherContent({
   onAddBlock,
   onEditBlock,
   onToggleStatus,
+  audioAssets,
+  onPlayAudio,
   onDelete,
 }: {
   books: BookSummary[];
@@ -1924,8 +1951,16 @@ function TeacherContent({
   onAddBlock: (lesson: LessonSummary) => void;
   onEditBlock: (lesson: LessonSummary, index: number) => void;
   onToggleStatus: (id: string) => void;
+  audioAssets: Record<string, AudioAsset>;
+  onPlayAudio: (asset: AudioAsset) => void;
   onDelete: (lesson: LessonSummary) => void;
 }) {
+  const [lessonMode, setLessonMode] = useState<"organize" | "preview">("organize");
+  const [previewRole, setPreviewRole] = useState<"teacher" | "student">("teacher");
+  const selectedBlocks = selectedLesson ? lessonBlocks(selectedLesson) : [];
+  const previewContent = previewRole === "student"
+    ? selectedBlocks.filter((section) => section.audience !== "teacher")
+    : selectedBlocks;
   return (
     <section className="content-section">
       <PageHeading
@@ -2000,23 +2035,87 @@ function TeacherContent({
                       <span>{selectedLesson.homeworkCount} perguntas</span>
                     </div>
 
-                    <div className="block-list">
-                      {selectedLesson.sections.map((section, index) => (
-                        <div className="content-block-row" key={`${selectedLesson.id}-${index}`}>
-                          <span className="drag-number">{String(index + 1).padStart(2, "0")}</span>
-                          <span className="block-icon">{section.toLowerCase().includes("home") || section.toLowerCase().includes("exercise") ? <ClipboardCheck /> : <Layers3 />}</span>
-                          <span><strong>{section}</strong></span>
-                          <Button variant="ghost" size="icon" onClick={() => onEditBlock(selectedLesson, index)} aria-label={`Editar ${section}`}><PencilLine /></Button>
+                    <div className="lesson-mode-toolbar">
+                      <div className="lesson-mode-buttons">
+                        <Button
+                          variant={lessonMode === "organize" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setLessonMode("organize")}
+                        >
+                          <Layers3 /> Organizar
+                        </Button>
+                        <Button
+                          variant={lessonMode === "preview" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setLessonMode("preview")}
+                        >
+                          <Eye /> Visualizar
+                        </Button>
+                      </div>
+                      {lessonMode === "preview" ? (
+                        <div className="preview-role-buttons">
+                          <button
+                            type="button"
+                            className={previewRole === "teacher" ? "active" : ""}
+                            onClick={() => setPreviewRole("teacher")}
+                          >
+                            Professora
+                          </button>
+                          <button
+                            type="button"
+                            className={previewRole === "student" ? "active" : ""}
+                            onClick={() => setPreviewRole("student")}
+                          >
+                            Aluno
+                          </button>
                         </div>
-                      ))}
-                      <button className="add-block-button" onClick={() => onAddBlock(selectedLesson)}><Plus /> Adicionar bloco</button>
+                      ) : null}
                     </div>
 
-                    <div className="audio-ready-row">
-                      <div className="audio-ready-icon"><Headphones /></div>
-                      <div><strong>Áudios</strong><p>{selectedLesson.audioCount > 0 ? `${selectedLesson.audioCount} arquivo(s)` : "Nenhum áudio"}</p></div>
-                      <Button variant="outline" onClick={onAddAudio}><Upload /> Adicionar áudio</Button>
-                    </div>
+                    {lessonMode === "organize" ? (
+                      <>
+                        <div className="block-list">
+                          {selectedBlocks.map((section, index) => (
+                            <div className={`content-block-row ${section.audience === "teacher" ? "teacher-only" : ""}`} key={section.id}>
+                              <span className="drag-number">{String(index + 1).padStart(2, "0")}</span>
+                              <span className="block-icon">{section.title.toLowerCase().includes("home") || section.title.toLowerCase().includes("exercise") ? <ClipboardCheck /> : section.audience === "teacher" ? <LockKeyhole /> : <Layers3 />}</span>
+                              <span>
+                                <strong>{section.title}</strong>
+                                <small>{section.audience === "teacher" ? "Somente professora" : "Aluno e professora"}</small>
+                              </span>
+                              <Button variant="ghost" size="icon" onClick={() => onEditBlock(selectedLesson, index)} aria-label={`Editar ${section.title}`}><PencilLine /></Button>
+                            </div>
+                          ))}
+                          <button className="add-block-button" onClick={() => onAddBlock(selectedLesson)}><Plus /> Adicionar bloco</button>
+                        </div>
+
+                        <div className="audio-ready-row">
+                          <div className="audio-ready-icon"><Headphones /></div>
+                          <div><strong>Áudios</strong><p>{selectedLesson.audioCount > 0 ? `${selectedLesson.audioCount} arquivo(s)` : "Nenhum áudio"}</p></div>
+                          <Button variant="outline" onClick={onAddAudio}><Upload /> Adicionar áudio</Button>
+                        </div>
+                      </>
+                    ) : (
+                      <article className="lesson-reader teacher-lesson-preview">
+                        <header className="lesson-reader-header">
+                          <div>
+                            <p>{selectedBook.title} · Lesson {selectedLesson.order}</p>
+                            <h2>{selectedLesson.title}</h2>
+                            {selectedLesson.subtitle ? <span>{selectedLesson.subtitle}</span> : null}
+                          </div>
+                          <Badge variant="secondary">
+                            {previewRole === "teacher" ? <GraduationCap /> : <BookCheck />}
+                            {previewRole === "teacher" ? "Professora" : "Aluno"}
+                          </Badge>
+                        </header>
+                        <LessonContentSections
+                          lesson={{ ...selectedLesson, content: previewContent }}
+                          audioAssets={audioAssets}
+                          onPlayAudio={onPlayAudio}
+                          showTeacherAudience={previewRole === "teacher"}
+                        />
+                      </article>
+                    )}
 
                     <div className="editor-actions">
                       <Button variant="outline" onClick={() => onEditLesson(selectedLesson)}><PencilLine /> Editar lição</Button>
@@ -2294,6 +2393,91 @@ function StudentHome({
   );
 }
 
+function LessonContentSections({
+  lesson,
+  audioAssets,
+  onPlayAudio,
+  showTeacherAudience = false,
+}: {
+  lesson: LessonSummary;
+  audioAssets: Record<string, AudioAsset>;
+  onPlayAudio: (asset: AudioAsset) => void;
+  showTeacherAudience?: boolean;
+}) {
+  const sections = lesson.content ?? [];
+  const availableLessonAudio = getAudioTargets(lesson).flatMap((target) => {
+    const asset = audioAssets[target.id];
+    return isAudioAvailableToStudent(asset) ? [{ target, asset }] : [];
+  });
+
+  if (sections.length === 0) {
+    return (
+      <div className="placeholder-lesson-content">
+        <span><BookOpenText /></span>
+        <h3>{lesson.sections.join(" · ")}</h3>
+        {availableLessonAudio.length > 0 ? (
+          <div className="lesson-audio-list">
+            {availableLessonAudio.map(({ target, asset }) => (
+              <Button variant="outline" key={target.id} onClick={() => onPlayAudio(asset)}>
+                <Volume2 /> {target.label}
+              </Button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="learning-sections">
+      {sections.map((section) => {
+        const readingSection =
+          section.title === "Let’s Talk" || section.title.startsWith("Song");
+        const teacherOnly = section.audience === "teacher";
+        return (
+          <section
+            className={`learning-section ${readingSection ? "reading" : ""} ${teacherOnly ? "teacher-only" : ""}`}
+            key={section.id}
+          >
+            {showTeacherAudience && teacherOnly ? (
+              <span className="teacher-only-label"><LockKeyhole /> Somente professora</span>
+            ) : null}
+            <h3>{section.title}</h3>
+            <div className="learning-items">
+              {section.items.map((item, itemIndex) => {
+                const targetId = buildAudioTargetId(
+                  lesson.id,
+                  section.id,
+                  item.english,
+                );
+                const audioAsset = audioAssets[targetId];
+                return (
+                  <div className="learning-item" key={`${section.id}-${item.english}-${itemIndex}`}>
+                    <div>
+                      <strong>{item.english}</strong>
+                      {item.portuguese ? <span>{item.portuguese}</span> : null}
+                    </div>
+                    {isAudioAvailableToStudent(audioAsset) ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => onPlayAudio(audioAsset)}
+                        aria-label={`Ouvir ${item.english}`}
+                      >
+                        <Volume2 />
+                      </Button>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function StudentLessons({
   lessons,
   book,
@@ -2321,11 +2505,6 @@ function StudentLessons({
       && selectedLesson.order <= student.currentLesson
       && selectedLesson.status === "published",
   );
-  const availableLessonAudio = selectedLesson ? getAudioTargets(selectedLesson).flatMap((target) => {
-    const asset = audioAssets[target.id];
-    return isAudioAvailableToStudent(asset) ? [{ target, asset }] : [];
-  }) : [];
-
   useEffect(() => {
     if (!mobileLessonFocused) return;
     if (!window.matchMedia("(max-width: 899px)").matches) return;
@@ -2404,64 +2583,11 @@ function StudentLessons({
               <Badge variant="secondary"><BookCheck /> Available</Badge>
             </header>
 
-            {(selectedLesson.content?.length ?? 0) > 0 ? (
-              <div className="learning-sections">
-                {(selectedLesson.content ?? []).map((section) => {
-                  const readingSection =
-                    section.title === "Let’s Talk" || section.title.startsWith("Song");
-                  return (
-                    <section
-                      className={`learning-section ${readingSection ? "reading" : ""}`}
-                      key={section.id}
-                    >
-                      <h3>{section.title}</h3>
-                      <div className="learning-items">
-                        {section.items.map((item) => {
-                          const targetId = buildAudioTargetId(
-                            selectedLesson.id,
-                            section.id,
-                            item.english,
-                          );
-                          const audioAsset = audioAssets[targetId];
-                          return (
-                            <div className="learning-item" key={`${section.id}-${item.english}`}>
-                              <div>
-                                <strong>{item.english}</strong>
-                                {item.portuguese ? <span>{item.portuguese}</span> : null}
-                              </div>
-                              {isAudioAvailableToStudent(audioAsset) ? (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => onPlayAudio(audioAsset)}
-                                  aria-label={`Ouvir ${item.english}`}
-                                >
-                                  <Volume2 />
-                                </Button>
-                              ) : null}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="placeholder-lesson-content">
-                <span><BookOpenText /></span>
-                <h3>{selectedLesson.sections.join(" · ")}</h3>
-                {availableLessonAudio.length > 0 ? (
-                  <div className="lesson-audio-list">
-                    {availableLessonAudio.map(({ target, asset }) => (
-                      <Button variant="outline" key={target.id} onClick={() => onPlayAudio(asset)}>
-                        <Volume2 /> {target.label}
-                      </Button>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            )}
+            <LessonContentSections
+              lesson={selectedLesson}
+              audioAssets={audioAssets}
+              onPlayAudio={onPlayAudio}
+            />
           </article>
           </div>
         ) : null}
@@ -2740,6 +2866,21 @@ function BlockDialog({
           <DialogHeader><DialogTitle>{value ? "Editar bloco" : "Novo bloco"}</DialogTitle></DialogHeader>
           <div className="dialog-form">
             <div className="field-stack"><Label htmlFor="block-name">Nome</Label><Input id="block-name" name="name" defaultValue={value} placeholder="Ex.: Vocabulary" autoFocus /></div>
+            <div className="field-stack">
+              <Label htmlFor="block-audience">Quem pode visualizar</Label>
+              <select
+                id="block-audience"
+                name="audience"
+                className="native-select"
+                defaultValue={section?.audience === "teacher" ? "teacher" : "student"}
+              >
+                <option value="student">Aluno e professora</option>
+                <option value="teacher">Somente professora</option>
+              </select>
+              <small className="field-help">
+                Blocos exclusivos da professora são salvos em uma área separada e protegida.
+              </small>
+            </div>
             <div className="form-grid two">
               <div className="field-stack">
                 <Label htmlFor="block-english">Inglês</Label>

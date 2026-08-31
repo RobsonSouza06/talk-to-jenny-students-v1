@@ -34,6 +34,8 @@ export type LearningSection = {
   id: string;
   title: string;
   items: LearningItem[];
+  audience?: "student" | "teacher";
+  order?: number;
 };
 
 export type HomeworkQuestion = {
