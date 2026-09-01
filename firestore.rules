@@ -193,6 +193,11 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Conteúdo temporariamente excluído é visível e recuperável somente pela professora.
+    match /trash/{trashId} {
+      allow read, create, update, delete: if isTeacher();
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
