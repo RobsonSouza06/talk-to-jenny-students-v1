@@ -3093,10 +3093,10 @@ function BlockDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={onSubmit}>
+      <DialogContent className="block-dialog-content">
+        <form className="block-dialog-layout" onSubmit={onSubmit}>
           <DialogHeader><DialogTitle>{value ? "Editar bloco" : "Novo bloco"}</DialogTitle></DialogHeader>
-          <div className="dialog-form">
+          <div className="dialog-form block-dialog-scroll">
             <div className="field-stack"><Label htmlFor="block-name">Nome</Label><Input id="block-name" name="name" defaultValue={value} placeholder="Ex.: Vocabulary" autoFocus /></div>
             <div className="field-stack">
               <Label htmlFor="block-audience">Quem pode visualizar</Label>
@@ -3155,6 +3155,7 @@ function BlockDialog({
               <Textarea
                 id="block-audio-embed"
                 name="audioEmbed"
+                className="block-audio-embed-input"
                 rows={3}
                 defaultValue={section?.audioEmbedUrl ?? ""}
                 placeholder="No Audio.com, use Share → Embed e cole aqui o código copiado"

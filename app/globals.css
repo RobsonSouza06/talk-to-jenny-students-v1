@@ -1732,6 +1732,44 @@ body.lesson-presentation-open {
   padding: 1rem 0;
 }
 
+.block-dialog-content {
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+}
+
+.block-dialog-layout {
+  display: flex;
+  min-height: 0;
+  max-height: calc(100dvh - 5rem);
+  flex-direction: column;
+}
+
+.block-dialog-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.35rem;
+  scrollbar-gutter: stable;
+}
+
+.block-dialog-layout [data-slot="dialog-header"],
+.block-dialog-layout [data-slot="dialog-footer"] {
+  flex: 0 0 auto;
+}
+
+.block-dialog-layout [data-slot="dialog-footer"] {
+  border-top: 1px solid #e2e8ee;
+  background: var(--background);
+  padding-top: 0.85rem;
+}
+
+.block-audio-embed-input {
+  min-height: 6rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  resize: vertical;
+}
+
 .student-account-note {
   display: flex;
   flex-direction: column;
