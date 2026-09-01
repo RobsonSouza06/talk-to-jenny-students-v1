@@ -19,6 +19,7 @@ import {
   Gamepad2,
   GraduationCap,
   Headphones,
+  History,
   Home,
   Layers3,
   LibraryBig,
@@ -28,6 +29,7 @@ import {
   PencilLine,
   Play,
   Plus,
+  RotateCcw,
   Save,
   ShieldCheck,
   Trash2,
@@ -117,15 +119,19 @@ import {
   clearStudentAttempts,
   createStudentProfile,
   deleteBookPermanently,
-  deleteHomeworkQuestionPermanently,
-  deleteLessonPermanently,
   deleteStudentPermanently,
+  loadAuditLogs,
   loadStudentAttempts,
   loadStudentWorkspace,
   loadTeacherWorkspace,
+  loadTrashItems,
   moveLesson,
+  moveHomeworkQuestionToTrash,
+  moveLessonToTrash,
   observeAuth,
+  purgeTrashItem,
   requestPasswordReset,
+  restoreTrashItem,
   saveBook,
   saveLesson,
   saveStudentAttempt,
@@ -133,7 +139,9 @@ import {
   signOutCurrentUser,
   updateStudentProgress,
   type FirebaseSession,
+  type AuditLog,
   type StudentAttempt,
+  type TrashItem,
 } from "@/lib/firebase-learning-repository";
 
 import {
@@ -147,18 +155,32 @@ import {
 type Role = "teacher" | "student";
 type TeacherView = "home" | "content" | "students" | "data";
 type StudentView = "home" | "lessons" | "homework";
-type BlockEditorState = {
+type LessonKey = {
+  bookId: string;
   lessonId: string;
+};
+type BlockEditorState = LessonKey & {
   index: number | null;
 };
 type DeleteRequest = {
-  kind: "answers" | "student" | "homework" | "lesson" | "book";
+  kind: "answers" | "student" | "homework" | "lesson" | "book" | "trash";
   targetId: string;
-  parentId?: string;
+  bookId?: string;
+  lessonId?: string;
   title: string;
   description: string;
   affected: string;
+  confirmation: string;
+  actionLabel?: string;
 };
+
+function matchesLesson(lesson: LessonSummary, key?: LessonKey | null) {
+  return Boolean(
+    key
+    && lesson.bookId === key.bookId
+    && lesson.id === key.lessonId,
+  );
+}
 
 function studentAttemptState(attempts: Record<string, StudentAttempt>) {
   return {
@@ -249,6 +271,8 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [lessons, setLessons] = useState<LessonSummary[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const [workspaceError, setWorkspaceError] = useState("");
   const [activeStudentId, setActiveStudentId] = useState(
@@ -262,10 +286,11 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   const [newBookOpen, setNewBookOpen] = useState(false);
   const [newLessonOpen, setNewLessonOpen] = useState(false);
   const [editingBookId, setEditingBookId] = useState<string | null>(null);
-  const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
+  const [editingLessonKey, setEditingLessonKey] = useState<LessonKey | null>(null);
   const [blockEditor, setBlockEditor] = useState<BlockEditorState | null>(null);
   const [newHomeworkOpen, setNewHomeworkOpen] = useState(false);
   const [editingHomework, setEditingHomework] = useState<{
+    bookId: string;
     lessonId: string;
     questionId: string;
   } | null>(null);
@@ -290,6 +315,8 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         setBooks(data.books);
         setLessons(data.lessons);
         setStudents(data.students);
+        setTrashItems(data.trashItems);
+        setAuditLogs(data.auditLogs);
         const firstStudent = data.students[0];
         setActiveStudentId(firstStudent?.id ?? "");
         const firstBook = data.books[0];
@@ -376,14 +403,16 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     ?? currentStudentLesson
     ?? activeBookLessons[0];
   const editingBook = books.find((book) => book.id === editingBookId);
-  const editingLesson = lessons.find((lesson) => lesson.id === editingLessonId);
+  const editingLesson = lessons.find((lesson) =>
+    matchesLesson(lesson, editingLessonKey),
+  );
   const editingHomeworkLesson = lessons.find(
-    (lesson) => lesson.id === editingHomework?.lessonId,
+    (lesson) => matchesLesson(lesson, editingHomework),
   );
   const editingHomeworkQuestion = editingHomeworkLesson?.homework?.find(
     (question) => question.id === editingHomework?.questionId,
   );
-  const blockLesson = lessons.find((lesson) => lesson.id === blockEditor?.lessonId);
+  const blockLesson = lessons.find((lesson) => matchesLesson(lesson, blockEditor));
   const draftBookRecord = books.find((book) => book.order === Number(draftBook));
   const draftBookLessons = lessons
     .filter((lesson) => lesson.bookId === draftBookRecord?.id)
@@ -650,7 +679,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     }
     const orderInUse = lessons.some(
       (lesson) =>
-        lesson.id !== editingLesson.id
+        !(
+          lesson.id === editingLesson.id
+          && lesson.bookId === editingLesson.bookId
+        )
         && lesson.bookId === bookId
         && lesson.order === order,
     );
@@ -663,7 +695,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       await moveLesson(editingLesson.bookId, updatedLesson);
       setLessons((current) =>
         current.map((lesson) =>
-          lesson.id === editingLesson.id ? updatedLesson : lesson,
+          lesson.id === editingLesson.id
+            && lesson.bookId === editingLesson.bookId
+            ? updatedLesson
+            : lesson,
         ),
       );
       if (editingLesson.bookId !== bookId) {
@@ -684,7 +719,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       }
       setSelectedBookId(bookId);
       setSelectedLessonId(editingLesson.id);
-      setEditingLessonId(null);
+      setEditingLessonKey(null);
       toast.success("Lição atualizada.");
     } catch {
       toast.error("Não foi possível atualizar a lição.");
@@ -733,7 +768,9 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       await saveLesson(updatedLesson);
       setLessons((current) =>
         current.map((lesson) =>
-          lesson.id === blockLesson.id ? updatedLesson : lesson,
+          lesson.id === blockLesson.id && lesson.bookId === blockLesson.bookId
+            ? updatedLesson
+            : lesson,
         ),
       );
       setBlockEditor(null);
@@ -749,15 +786,18 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    const bookId = String(form.get("book") ?? "");
     const lessonId = String(form.get("lesson") ?? "");
     const category = String(form.get("category") ?? "Homework").trim() || "Homework";
     const question = String(form.get("question") ?? "").trim();
     const answer = String(form.get("answer") ?? "").trim();
-    if (!lessonId || !question || !answer) {
+    if (!bookId || !lessonId || !question || !answer) {
       toast.error("Preencha a lição, a pergunta e a resposta correta.");
       return;
     }
-    const lesson = lessons.find((item) => item.id === lessonId);
+    const lesson = lessons.find(
+      (item) => item.id === lessonId && item.bookId === bookId,
+    );
     if (!lesson) return;
     const homework = [
       ...(lesson.homework ?? []),
@@ -776,7 +816,9 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     try {
       await saveLesson(updatedLesson);
       setLessons((current) =>
-        current.map((item) => (item.id === lessonId ? updatedLesson : item)),
+        current.map((item) =>
+          item.id === lessonId && item.bookId === bookId ? updatedLesson : item,
+        ),
       );
       setSelectedBookId(lesson.bookId);
       setSelectedLessonId(lesson.id);
@@ -813,7 +855,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       await saveLesson(updatedLesson);
       setLessons((current) =>
         current.map((lesson) =>
-          lesson.id === updatedLesson.id ? updatedLesson : lesson,
+          lesson.id === updatedLesson.id
+            && lesson.bookId === updatedLesson.bookId
+            ? updatedLesson
+            : lesson,
         ),
       );
       setEditingHomework(null);
@@ -871,8 +916,20 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     setDeleteRequest(request);
   }
 
-  async function confirmPermanentDelete() {
-    if (!deleteRequest || deleteConfirmation !== "EXCLUIR") return;
+  async function refreshProtectionData() {
+    const [nextTrashItems, nextAuditLogs] = await Promise.all([
+      loadTrashItems(),
+      loadAuditLogs(),
+    ]);
+    setTrashItems(nextTrashItems);
+    setAuditLogs(nextAuditLogs);
+  }
+
+  async function confirmDelete() {
+    if (
+      !deleteRequest
+      || deleteConfirmation !== deleteRequest.confirmation
+    ) return;
     try {
       if (deleteRequest.kind === "answers") {
         await clearStudentAttempts(deleteRequest.targetId);
@@ -895,12 +952,17 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       }
       if (deleteRequest.kind === "homework") {
         const lesson = lessons.find(
-          (item) => item.id === deleteRequest.parentId,
+          (item) =>
+            item.id === deleteRequest.lessonId
+            && item.bookId === deleteRequest.bookId,
         );
         if (!lesson) throw new Error("Lição não encontrada.");
-        await deleteHomeworkQuestionPermanently(
+        const bookTitle = books.find((book) => book.id === lesson.bookId)?.title
+          ?? "Livro";
+        const trashItem = await moveHomeworkQuestionToTrash(
           lesson,
           deleteRequest.targetId,
+          bookTitle,
         );
         const homework = (lesson.homework ?? []).filter(
           (question) => question.id !== deleteRequest.targetId,
@@ -912,24 +974,37 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         };
         setLessons((current) =>
           current.map((item) =>
-            item.id === lesson.id ? updatedLesson : item,
+            item.id === lesson.id && item.bookId === lesson.bookId
+              ? updatedLesson
+              : item,
           ),
         );
+        setTrashItems((current) => [trashItem, ...current]);
         setEditingHomework(null);
-        toast.success("Pergunta excluída permanentemente.");
+        await refreshProtectionData();
+        toast.success("Pergunta movida para a lixeira por 10 dias.");
       }
       if (deleteRequest.kind === "lesson") {
         const deletedLesson = lessons.find(
-          (lesson) => lesson.id === deleteRequest.targetId,
+          (lesson) =>
+            lesson.id === deleteRequest.targetId
+            && lesson.bookId === deleteRequest.bookId,
         );
         if (deletedLesson) {
-          await deleteLessonPermanently(
-            deletedLesson.bookId,
-            deleteRequest.targetId,
+          const bookTitle = books.find(
+            (book) => book.id === deletedLesson.bookId,
+          )?.title ?? "Livro";
+          const trashItem = await moveLessonToTrash(
+            deletedLesson,
+            bookTitle,
           );
+          setTrashItems((current) => [trashItem, ...current]);
         }
         setLessons((current) =>
-          current.filter((lesson) => lesson.id !== deleteRequest.targetId),
+          current.filter((lesson) => !(
+            lesson.id === deleteRequest.targetId
+            && lesson.bookId === deleteRequest.bookId
+          )),
         );
         if (deletedLesson) {
           setBooks((current) =>
@@ -946,7 +1021,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         setAudioAssets((current) =>
           Object.fromEntries(
             Object.entries(current).filter(
-              ([, asset]) => asset.lessonId !== deleteRequest.targetId,
+              ([, asset]) => !(
+                asset.lessonId === deleteRequest.targetId
+                && asset.bookId === deleteRequest.bookId
+              ),
             ),
           ),
         );
@@ -958,7 +1036,8 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
           )
           .sort((a, b) => a.order - b.order)[0];
         if (nextLesson) setSelectedLessonId(nextLesson.id);
-        toast.success("Lição e homework relacionados foram excluídos.");
+        await refreshProtectionData();
+        toast.success("Lição movida para a lixeira por 10 dias.");
       }
       if (deleteRequest.kind === "book") {
         await deleteBookPermanently(deleteRequest.targetId);
@@ -985,16 +1064,72 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         setEditingBookId(null);
         toast.success("Livro e conteúdo relacionado foram excluídos.");
       }
+      if (deleteRequest.kind === "trash") {
+        const item = trashItems.find(
+          (trashItem) => trashItem.id === deleteRequest.targetId,
+        );
+        if (!item) throw new Error("Item não encontrado na lixeira.");
+        await purgeTrashItem(item);
+        await refreshProtectionData();
+        toast.success("Item excluído permanentemente.");
+      }
       setDeleteRequest(null);
       setDeleteConfirmation("");
-    } catch {
-      toast.error("Não foi possível concluir a exclusão.");
+    } catch (error) {
+      const message = error instanceof Error
+        && error.message.includes("trash-retention-active")
+        ? "A exclusão permanente só fica disponível após 10 dias."
+        : "Não foi possível concluir a exclusão.";
+      toast.error(message);
     }
   }
 
-  async function toggleLessonStatus(lessonId: string) {
-    const lesson = lessons.find((item) => item.id === lessonId);
-    if (!lesson) return;
+  async function restoreDeletedItem(item: TrashItem) {
+    try {
+      await restoreTrashItem(item);
+      if (item.kind === "lesson") {
+        const restoredLesson = item.payload as LessonSummary;
+        setLessons((current) => [...current, restoredLesson]);
+        setBooks((current) => current.map((book) =>
+          book.id === item.bookId
+            ? { ...book, lessonCount: (book.lessonCount ?? 0) + 1 }
+            : book,
+        ));
+        setSelectedBookId(item.bookId);
+        setSelectedLessonId(item.lessonId);
+      } else {
+        const question = item.payload as HomeworkQuestion;
+        setLessons((current) => current.map((lesson) => {
+          if (lesson.id !== item.lessonId || lesson.bookId !== item.bookId) {
+            return lesson;
+          }
+          const homework = [...(lesson.homework ?? [])];
+          const position = Math.min(
+            Math.max(item.position ?? homework.length, 0),
+            homework.length,
+          );
+          homework.splice(position, 0, question);
+          return { ...lesson, homework, homeworkCount: homework.length };
+        }));
+      }
+      await refreshProtectionData();
+      toast.success("Item restaurado no local original.");
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      const message = code.includes("trash-lesson-conflict")
+        ? "Já existe uma lição com este identificador nesse livro."
+        : code.includes("trash-question-conflict")
+          ? "Esta pergunta já existe novamente na lição."
+          : code.includes("trash-book-missing")
+            ? "O livro original não existe mais e o item não pode ser restaurado."
+          : code.includes("trash-parent-missing")
+            ? "Restaure primeiro a lição que continha esta pergunta."
+            : "Não foi possível restaurar o item.";
+      toast.error(message);
+    }
+  }
+
+  async function toggleLessonStatus(lesson: LessonSummary) {
     const updatedLesson: LessonSummary = {
       ...lesson,
       status: lesson.status === "published" ? "draft" : "published",
@@ -1002,7 +1137,11 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     try {
       await saveLesson(updatedLesson);
       setLessons((current) =>
-        current.map((item) => (item.id === lessonId ? updatedLesson : item)),
+        current.map((item) =>
+          item.id === lesson.id && item.bookId === lesson.bookId
+            ? updatedLesson
+            : item,
+        ),
       );
       toast.success(
         lesson.status === "published"
@@ -1076,6 +1215,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       setLessons((current) =>
         current.map((lesson) =>
           lesson.id === selectedTeacherLesson.id
+            && lesson.bookId === selectedTeacherLesson.bookId
             ? { ...lesson, audioCount: lesson.audioCount + 1 }
             : lesson,
         ),
@@ -1241,27 +1381,46 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                   onNewBook={() => setNewBookOpen(true)}
                   onEditBook={() => setEditingBookId(selectedBook.id)}
                   onNewLesson={() => setNewLessonOpen(true)}
-                  onEditLesson={(lesson) => setEditingLessonId(lesson.id)}
+                  onEditLesson={(lesson) => setEditingLessonKey({
+                    bookId: lesson.bookId,
+                    lessonId: lesson.id,
+                  })}
                   onNewHomework={() => setNewHomeworkOpen(true)}
-                  onEditHomework={(lessonId, questionId) =>
-                    setEditingHomework({ lessonId, questionId })
+                  onEditHomework={(lesson, questionId) =>
+                    setEditingHomework({
+                      bookId: lesson.bookId,
+                      lessonId: lesson.id,
+                      questionId,
+                    })
                   }
                   onDeleteHomework={(lesson, question) =>
                     requestDelete({
                       kind: "homework",
                       targetId: question.id,
-                      parentId: lesson.id,
-                      title: "Excluir pergunta?",
-                      description: "A pergunta e as respostas salvas serão removidas.",
+                      bookId: lesson.bookId,
+                      lessonId: lesson.id,
+                      title: "Mover pergunta para a lixeira?",
+                      description:
+                        `Livro ${books.find((book) => book.id === lesson.bookId)?.order ?? ""} · Lesson ${lesson.order}. A pergunta poderá ser restaurada durante 10 dias e as respostas dos alunos serão preservadas nesse período.`,
                       affected: "1 pergunta",
+                      confirmation: "EXCLUIR PERGUNTA",
+                      actionLabel: "Mover para a lixeira",
                     })
                   }
                   onAddAudio={() => setAudioDialogOpen(true)}
                   onAddBlock={(lesson) =>
-                    setBlockEditor({ lessonId: lesson.id, index: null })
+                    setBlockEditor({
+                      bookId: lesson.bookId,
+                      lessonId: lesson.id,
+                      index: null,
+                    })
                   }
                   onEditBlock={(lesson, index) =>
-                    setBlockEditor({ lessonId: lesson.id, index })
+                    setBlockEditor({
+                      bookId: lesson.bookId,
+                      lessonId: lesson.id,
+                      index,
+                    })
                   }
                   onToggleStatus={toggleLessonStatus}
                   audioAssets={audioAssets}
@@ -1270,10 +1429,14 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                     requestDelete({
                       kind: "lesson",
                       targetId: lesson.id,
-                      title: `Excluir Lesson ${lesson.order}?`,
+                      bookId: lesson.bookId,
+                      lessonId: lesson.id,
+                      title: `Mover Lesson ${lesson.order} para a lixeira?`,
                       description:
-                        "A lição, seus blocos e todas as perguntas do homework serão removidos. O conteúdo dos outros livros e lições será mantido.",
+                        `${selectedBook.title}. A lição, seus blocos e o homework poderão ser restaurados durante 10 dias. As respostas dos alunos serão preservadas nesse período.`,
                       affected: `1 lição · ${lesson.homeworkCount} perguntas`,
+                      confirmation: `EXCLUIR LIÇÃO ${lesson.order}`,
+                      actionLabel: "Mover para a lixeira",
                     })
                   }
                 />
@@ -1300,6 +1463,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                       title: `Excluir respostas de ${student.name}?`,
                       description: "O cadastro e o progresso serão mantidos.",
                       affected: `${student.answered} respostas armazenadas`,
+                      confirmation: "EXCLUIR",
                     })
                   }
                   onDeleteStudent={(student) =>
@@ -1310,6 +1474,21 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                       description:
                         "Cadastro, progresso e respostas serão removidos. A conta de acesso deve ser excluída separadamente no Firebase Authentication.",
                       affected: `1 cadastro · ${student.answered} respostas`,
+                      confirmation: "EXCLUIR",
+                    })
+                  }
+                  trashItems={trashItems}
+                  auditLogs={auditLogs}
+                  onRestoreTrash={restoreDeletedItem}
+                  onPurgeTrash={(item) =>
+                    requestDelete({
+                      kind: "trash",
+                      targetId: item.id,
+                      title: "Excluir item permanentemente?",
+                      description:
+                        "Esta ação remove também as respostas relacionadas e não poderá ser desfeita.",
+                      affected: item.label,
+                      confirmation: "EXCLUIR DEFINITIVAMENTE",
                     })
                   }
                 />
@@ -1474,6 +1653,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                       title: `Excluir respostas de ${managedStudent.name}?`,
                       description: "O cadastro e o progresso serão mantidos.",
                       affected: `${managedStudent.answered} respostas armazenadas`,
+                      confirmation: "EXCLUIR",
                     })}
                     disabled={managedStudent.answered === 0}
                   >
@@ -1487,6 +1667,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                       title: `Excluir ${managedStudent.name} permanentemente?`,
                       description: "Cadastro, progresso e respostas serão removidos. A conta de acesso deve ser excluída separadamente no Firebase Authentication.",
                       affected: `1 cadastro · ${managedStudent.answered} respostas`,
+                      confirmation: "EXCLUIR",
                     })}
                   >
                     <Trash2 /> Excluir aluno e seus dados
@@ -1522,6 +1703,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
               title: `Excluir ${editingBook.title}?`,
               description: "Todas as lições, perguntas e áudios deste livro serão removidos.",
               affected: `${lessons.filter((lesson) => lesson.bookId === editingBook.id).length} lições`,
+              confirmation: "EXCLUIR LIVRO",
             });
           }}
           onSubmit={updateBook}
@@ -1537,7 +1719,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       {editingLesson ? (
         <EditLessonDialog
           open
-          onOpenChange={(open) => !open && setEditingLessonId(null)}
+          onOpenChange={(open) => !open && setEditingLessonKey(null)}
           lesson={editingLesson}
           books={books}
           onSubmit={updateLesson}
@@ -1566,6 +1748,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         onOpenChange={setNewHomeworkOpen}
         books={books}
         lessons={lessons}
+        defaultBookId={selectedTeacherLesson?.bookId}
         defaultLessonId={selectedTeacherLesson?.id}
         onSubmit={addHomework}
       />
@@ -1606,7 +1789,9 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
             <strong>{deleteRequest?.affected}</strong>
           </div>
           <div className="field-stack">
-            <Label htmlFor="delete-confirmation">Digite EXCLUIR para confirmar</Label>
+            <Label htmlFor="delete-confirmation">
+              Digite {deleteRequest?.confirmation} para confirmar
+            </Label>
             <Input
               id="delete-confirmation"
               value={deleteConfirmation}
@@ -1618,10 +1803,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              disabled={deleteConfirmation !== "EXCLUIR"}
-              onClick={confirmPermanentDelete}
+              disabled={deleteConfirmation !== deleteRequest?.confirmation}
+              onClick={confirmDelete}
             >
-              Excluir permanentemente
+              {deleteRequest?.actionLabel ?? "Excluir permanentemente"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1945,12 +2130,12 @@ function TeacherContent({
   onNewLesson: () => void;
   onEditLesson: (lesson: LessonSummary) => void;
   onNewHomework: () => void;
-  onEditHomework: (lessonId: string, questionId: string) => void;
+  onEditHomework: (lesson: LessonSummary, questionId: string) => void;
   onDeleteHomework: (lesson: LessonSummary, question: HomeworkQuestion) => void;
   onAddAudio: () => void;
   onAddBlock: (lesson: LessonSummary) => void;
   onEditBlock: (lesson: LessonSummary, index: number) => void;
-  onToggleStatus: (id: string) => void;
+  onToggleStatus: (lesson: LessonSummary) => void;
   audioAssets: Record<string, AudioAsset>;
   onPlayAudio: (asset: AudioAsset) => void;
   onDelete: (lesson: LessonSummary) => void;
@@ -2119,7 +2304,7 @@ function TeacherContent({
 
                     <div className="editor-actions">
                       <Button variant="outline" onClick={() => onEditLesson(selectedLesson)}><PencilLine /> Editar lição</Button>
-                      <Button onClick={() => onToggleStatus(selectedLesson.id)}>{selectedLesson.status === "published" ? <LockKeyhole /> : <Eye />}{selectedLesson.status === "published" ? "Voltar para rascunho" : "Publicar lição"}</Button>
+                      <Button onClick={() => onToggleStatus(selectedLesson)}>{selectedLesson.status === "published" ? <LockKeyhole /> : <Eye />}{selectedLesson.status === "published" ? "Voltar para rascunho" : "Publicar lição"}</Button>
                       <Button variant="ghost" className="delete-lesson" onClick={() => onDelete(selectedLesson)}><Trash2 /> Excluir</Button>
                     </div>
                   </CardContent>
@@ -2188,7 +2373,7 @@ function TeacherContent({
                         <TableCell className="homework-answer-cell">{question.answer}</TableCell>
                         <TableCell className="text-right">
                           <div className="table-actions">
-                            <Button variant="ghost" size="icon" onClick={() => onEditHomework(selectedLesson.id, question.id)} aria-label="Editar pergunta"><PencilLine /></Button>
+                            <Button variant="ghost" size="icon" onClick={() => onEditHomework(selectedLesson, question.id)} aria-label="Editar pergunta"><PencilLine /></Button>
                             <Button variant="ghost" size="icon" className="danger-icon-button" onClick={() => onDeleteHomework(selectedLesson, question)} aria-label="Excluir pergunta"><Trash2 /></Button>
                           </div>
                         </TableCell>
@@ -2271,15 +2456,23 @@ function TeacherData({
   students,
   totalAnswers,
   audioCount,
+  trashItems,
+  auditLogs,
   onDeleteAnswers,
   onDeleteStudent,
+  onRestoreTrash,
+  onPurgeTrash,
 }: {
   lessons: LessonSummary[];
   students: Student[];
   totalAnswers: number;
   audioCount: number;
+  trashItems: TrashItem[];
+  auditLogs: AuditLog[];
   onDeleteAnswers: (student: Student) => void;
   onDeleteStudent: (student: Student) => void;
+  onRestoreTrash: (item: TrashItem) => void;
+  onPurgeTrash: (item: TrashItem) => void;
 }) {
   return (
     <section className="content-section">
@@ -2289,6 +2482,79 @@ function TeacherData({
         <Card className="storage-card"><CardContent><span className="storage-icon red"><FileQuestion /></span><div><p>Respostas de alunos</p><strong>{totalAnswers} respostas</strong><small>estimativa: menos de 1 MB</small></div></CardContent></Card>
         <Card className="storage-card"><CardContent><span className="storage-icon muted"><Headphones /></span><div><p>Áudios</p><strong>{audioCount} arquivos</strong><small>{audioCount > 0 ? "prontos para os alunos" : "nenhum arquivo cadastrado"}</small></div></CardContent></Card>
       </div>
+
+      <Card className="panel-card trash-card">
+        <CardHeader className="panel-header">
+          <div>
+            <p className="panel-kicker">Proteção contra exclusões acidentais</p>
+            <CardTitle>Lixeira temporária</CardTitle>
+          </div>
+          <Badge variant="secondary"><ShieldCheck /> Retenção de 10 dias</Badge>
+        </CardHeader>
+        <CardContent>
+          {trashItems.length > 0 ? (
+            <div className="trash-list">
+              {trashItems.map((item) => {
+                const days = trashDaysRemaining(item);
+                return (
+                  <div className="trash-item" key={item.id}>
+                    <span className="trash-item-icon">
+                      {item.kind === "lesson" ? <BookOpenText /> : <ClipboardCheck />}
+                    </span>
+                    <div className="trash-item-copy">
+                      <strong>{item.kind === "lesson" ? "Lição" : "Pergunta"} · {item.label}</strong>
+                      <small>{item.bookTitle} · Lesson {item.lessonOrder} · excluído em {formatProtectionDate(item.deletedAt)}</small>
+                      <span>{days > 0 ? `${days} dia${days === 1 ? "" : "s"} para restaurar` : "Prazo concluído"}</span>
+                    </div>
+                    <div className="trash-item-actions">
+                      <Button variant="outline" size="sm" onClick={() => onRestoreTrash(item)}>
+                        <RotateCcw /> Restaurar
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="delete-text"
+                        disabled={days > 0}
+                        title={days > 0 ? "Disponível após o prazo de 10 dias" : undefined}
+                        onClick={() => onPurgeTrash(item)}
+                      >
+                        <Trash2 /> Excluir definitivamente
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="trash-empty">
+              <ArchiveX />
+              <div><strong>A lixeira está vazia</strong><span>Perguntas e lições excluídas aparecerão aqui por 10 dias.</span></div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="panel-card protection-history-card">
+        <CardHeader className="panel-header">
+          <div><p className="panel-kicker">Registro de segurança</p><CardTitle>Histórico recente</CardTitle></div>
+          <History />
+        </CardHeader>
+        <CardContent>
+          {auditLogs.length > 0 ? (
+            <div className="protection-history-list">
+              {auditLogs.slice(0, 12).map((log) => (
+                <div key={log.id}>
+                  <span>{auditActionLabel(log.action)}</span>
+                  <strong>{log.kind === "lesson" ? "Lição" : "Pergunta"} · {log.label}</strong>
+                  <small>{formatProtectionDate(log.occurredAt)}</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="protection-history-empty">As próximas exclusões e restaurações serão registradas aqui.</p>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="panel-card data-cleanup-card">
         <CardHeader className="panel-header"><div><p className="panel-kicker">Limpeza seletiva</p><CardTitle>Dados por aluno</CardTitle></div><Badge variant="secondary"><ShieldCheck /> Somente Jenny</Badge></CardHeader>
@@ -2311,6 +2577,26 @@ function TeacherData({
 
     </section>
   );
+}
+
+function trashDaysRemaining(item: TrashItem) {
+  const remaining = new Date(item.purgeAfter).getTime() - Date.now();
+  return Math.max(0, Math.ceil(remaining / 86_400_000));
+}
+
+function formatProtectionDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "data indisponível";
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function auditActionLabel(action: AuditLog["action"]) {
+  if (action === "restored") return "Restaurado";
+  if (action === "purged") return "Excluído definitivamente";
+  return "Movido para a lixeira";
 }
 
 function StudentHome({
@@ -2916,6 +3202,7 @@ function NewHomeworkDialog({
   onOpenChange,
   books,
   lessons,
+  defaultBookId,
   defaultLessonId,
   onSubmit,
 }: {
@@ -2923,10 +3210,13 @@ function NewHomeworkDialog({
   onOpenChange: (open: boolean) => void;
   books: BookSummary[];
   lessons: LessonSummary[];
+  defaultBookId?: string;
   defaultLessonId?: string;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const defaultLesson = lessons.find((lesson) => lesson.id === defaultLessonId);
+  const defaultLesson = lessons.find((lesson) =>
+    lesson.id === defaultLessonId && lesson.bookId === defaultBookId,
+  );
   const [bookId, setBookId] = useState(defaultLesson?.bookId ?? books[0]?.id ?? "");
   const [lessonId, setLessonId] = useState(defaultLesson?.id ?? lessons[0]?.id ?? "");
 
@@ -2951,6 +3241,7 @@ function NewHomeworkDialog({
                 <Label htmlFor="homework-book">Livro</Label>
                 <select
                   id="homework-book"
+                  name="book"
                   className="native-select"
                   value={selectedBookId}
                   onChange={(event) => {
@@ -3119,14 +3410,22 @@ function safePracticeUrl(value = "") {
 function getAudioTargets(lesson: LessonSummary) {
   const contentTargets = (lesson.content ?? []).flatMap((section) =>
     section.items.map((item) => ({
-      id: buildAudioTargetId(lesson.id, section.id, item.english),
+      id: buildAudioTargetId(
+        `${lesson.bookId}--${lesson.id}`,
+        section.id,
+        item.english,
+      ),
       label: `${section.title} · ${item.english}`,
     })),
   );
   if (contentTargets.length > 0) return contentTargets;
 
   return lesson.sections.map((section) => ({
-    id: buildAudioTargetId(lesson.id, section, "section-audio"),
+    id: buildAudioTargetId(
+      `${lesson.bookId}--${lesson.id}`,
+      section,
+      "section-audio",
+    ),
     label: section,
   }));
 }

@@ -11,6 +11,8 @@ import {
   getCountFromServer,
   getDoc,
   getDocs,
+  limit,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -56,6 +58,8 @@ export type WorkspaceData = {
   lessons: LessonSummary[];
   students: Student[];
   attempts: Record<string, StudentAttempt>;
+  trashItems: TrashItem[];
+  auditLogs: AuditLog[];
 };
 
 export type StudentAttempt = {
@@ -65,6 +69,38 @@ export type StudentAttempt = {
   questionId: string;
   answer: string;
   revealed: boolean;
+};
+
+export type TrashKind = "homework" | "lesson";
+
+export type TrashItem = {
+  id: string;
+  kind: TrashKind;
+  bookId: string;
+  lessonId: string;
+  questionId?: string;
+  bookTitle: string;
+  lessonOrder: number;
+  lessonTitle: string;
+  label: string;
+  deletedAt: string;
+  purgeAfter: string;
+  position?: number;
+  payload: HomeworkQuestion | LessonSummary;
+};
+
+export type AuditAction = "moved_to_trash" | "restored" | "purged";
+
+export type AuditLog = {
+  id: string;
+  action: AuditAction;
+  kind: TrashKind;
+  bookId: string;
+  lessonId: string;
+  questionId?: string;
+  label: string;
+  occurredAt: string;
+  actorUid: string;
 };
 
 export async function signIn(email: string, password: string) {
@@ -119,12 +155,15 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
 }
 
 export async function loadTeacherWorkspace(): Promise<WorkspaceData> {
+  await purgeExpiredTrash();
   const books = await loadBooksForTeacher();
-  const [lessons, students] = await Promise.all([
+  const [lessons, students, trashItems, auditLogs] = await Promise.all([
     loadLessonsForTeacher(books),
     loadStudentsForTeacher(),
+    loadTrashItems(),
+    loadAuditLogs(),
   ]);
-  return { books, lessons, students, attempts: {} };
+  return { books, lessons, students, attempts: {}, trashItems, auditLogs };
 }
 
 export async function loadStudentWorkspace(uid: string): Promise<WorkspaceData> {
@@ -174,6 +213,8 @@ export async function loadStudentWorkspace(uid: string): Promise<WorkspaceData> 
     lessons: lessonGroups.flat().sort(byBookAndOrder),
     students: [student],
     attempts,
+    trashItems: [],
+    auditLogs: [],
   };
 }
 
@@ -245,28 +286,7 @@ export async function saveBook(book: BookSummary) {
 export async function saveLesson(lesson: LessonSummary) {
   const db = firebaseDb();
   const batch = writeBatch(db);
-  const { lessonData, teacherContent } = lessonWriteData(lesson);
-  batch.set(
-    doc(db, "books", lesson.bookId, "lessons", lesson.id),
-    lessonData,
-    { merge: true },
-  );
-  const teacherReference = doc(
-    db,
-    "books",
-    lesson.bookId,
-    "teacherLessons",
-    lesson.id,
-  );
-  if (teacherContent.length > 0) {
-    batch.set(
-      teacherReference,
-      { content: clean(teacherContent), updatedAt: serverTimestamp() },
-      { merge: true },
-    );
-  } else {
-    batch.delete(teacherReference);
-  }
+  queueLessonWrite(batch, lesson);
   await batch.commit();
   await syncBookLessonCount(lesson.bookId);
 }
@@ -439,50 +459,198 @@ export async function deleteStudentPermanently(studentId: string) {
   await batch.commit();
 }
 
-export async function deleteLessonPermanently(
-  bookId: string,
-  lessonId: string,
+export async function moveLessonToTrash(
+  lesson: LessonSummary,
+  bookTitle: string,
 ) {
-  await deleteMatchingAttempts(
-    (data) => data.bookId === bookId && data.lessonId === lessonId,
-  );
   const db = firebaseDb();
+  const trashItem = createTrashItem({
+    kind: "lesson",
+    lesson,
+    bookTitle,
+    label: `Lesson ${lesson.order} · ${lesson.title}`,
+    payload: lesson,
+  });
   const batch = writeBatch(db);
-  batch.delete(doc(db, "books", bookId, "lessons", lessonId));
-  batch.delete(doc(db, "books", bookId, "teacherLessons", lessonId));
+  batch.set(doc(db, "trash", trashItem.id), clean(trashItem));
+  batch.delete(doc(db, "books", lesson.bookId, "lessons", lesson.id));
+  batch.delete(doc(db, "books", lesson.bookId, "teacherLessons", lesson.id));
+  queueAuditLog(batch, trashItem, "moved_to_trash");
   await batch.commit();
-  await syncBookLessonCount(bookId);
+  await syncBookLessonCount(lesson.bookId);
+  return trashItem;
 }
 
-export async function deleteHomeworkQuestionPermanently(
+export async function moveHomeworkQuestionToTrash(
   lesson: LessonSummary,
   questionId: string,
+  bookTitle: string,
 ) {
+  const position = (lesson.homework ?? []).findIndex(
+    (question) => question.id === questionId,
+  );
+  const question = lesson.homework?.[position];
+  if (!question) throw new Error("trash-question-not-found");
   const homework = (lesson.homework ?? []).filter(
-    (question) => question.id !== questionId,
+    (item) => item.id !== questionId,
   );
-  await deleteMatchingAttempts(
-    (data) =>
-      data.bookId === lesson.bookId
-      && data.lessonId === lesson.id
-      && data.questionId === questionId,
-  );
-  await saveLesson({
+  const updatedLesson = {
     ...lesson,
     homework,
     homeworkCount: homework.length,
+  };
+  const trashItem = createTrashItem({
+    kind: "homework",
+    lesson,
+    bookTitle,
+    label: question.prompt,
+    payload: question,
+    questionId,
+    position,
   });
+  const db = firebaseDb();
+  const batch = writeBatch(db);
+  batch.set(doc(db, "trash", trashItem.id), clean(trashItem));
+  queueLessonWrite(batch, updatedLesson);
+  queueAuditLog(batch, trashItem, "moved_to_trash");
+  await batch.commit();
+  return trashItem;
+}
+
+export async function loadTrashItems(): Promise<TrashItem[]> {
+  const snapshot = await getDocs(collection(firebaseDb(), "trash"));
+  return snapshot.docs
+    .map((item) => trashItemFromSnapshot(item.id, item.data()))
+    .filter((item): item is TrashItem => item !== null)
+    .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+}
+
+export async function loadAuditLogs(): Promise<AuditLog[]> {
+  const snapshot = await getDocs(
+    query(
+      collection(firebaseDb(), "auditLogs"),
+      orderBy("occurredAt", "desc"),
+      limit(40),
+    ),
+  );
+  return snapshot.docs.map((item) => {
+    const data = item.data();
+    return {
+      id: item.id,
+      action: data.action as AuditAction,
+      kind: data.kind as TrashKind,
+      bookId: String(data.bookId ?? ""),
+      lessonId: String(data.lessonId ?? ""),
+      questionId: data.questionId ? String(data.questionId) : undefined,
+      label: String(data.label ?? "Item"),
+      occurredAt: String(data.occurredAt ?? ""),
+      actorUid: String(data.actorUid ?? ""),
+    };
+  });
+}
+
+export async function restoreTrashItem(item: TrashItem) {
+  const db = firebaseDb();
+  const batch = writeBatch(db);
+  if (!(await getDoc(doc(db, "books", item.bookId))).exists()) {
+    throw new Error("trash-book-missing");
+  }
+
+  if (item.kind === "lesson") {
+    const activeReference = doc(
+      db,
+      "books",
+      item.bookId,
+      "lessons",
+      item.lessonId,
+    );
+    if ((await getDoc(activeReference)).exists()) {
+      throw new Error("trash-lesson-conflict");
+    }
+    queueLessonWrite(batch, item.payload as LessonSummary);
+  } else {
+    const lessonReference = doc(
+      db,
+      "books",
+      item.bookId,
+      "lessons",
+      item.lessonId,
+    );
+    const lessonSnapshot = await getDoc(lessonReference);
+    if (!lessonSnapshot.exists()) throw new Error("trash-parent-missing");
+    const data = lessonSnapshot.data();
+    const homework = Array.isArray(data.homework)
+      ? [...(data.homework as HomeworkQuestion[])]
+      : [];
+    const question = item.payload as HomeworkQuestion;
+    if (homework.some((current) => current.id === question.id)) {
+      throw new Error("trash-question-conflict");
+    }
+    const position = Math.min(
+      Math.max(item.position ?? homework.length, 0),
+      homework.length,
+    );
+    homework.splice(position, 0, question);
+    batch.set(
+      lessonReference,
+      {
+        homework: clean(homework),
+        homeworkCount: homework.length,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+
+  batch.delete(doc(db, "trash", item.id));
+  queueAuditLog(batch, item, "restored");
+  await batch.commit();
+  if (item.kind === "lesson") await syncBookLessonCount(item.bookId);
+}
+
+export async function purgeTrashItem(item: TrashItem, ignoreRetention = false) {
+  if (!ignoreRetention && new Date(item.purgeAfter).getTime() > Date.now()) {
+    throw new Error("trash-retention-active");
+  }
+  await deleteMatchingAttempts((data) =>
+    data.bookId === item.bookId
+    && data.lessonId === item.lessonId
+    && (
+      item.kind === "lesson"
+      || data.questionId === item.questionId
+    ),
+  );
+  const db = firebaseDb();
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "trash", item.id));
+  queueAuditLog(batch, item, "purged");
+  await batch.commit();
+}
+
+export async function purgeExpiredTrash() {
+  const items = await loadTrashItems();
+  const expired = items.filter(
+    (item) => new Date(item.purgeAfter).getTime() <= Date.now(),
+  );
+  for (const item of expired) {
+    await purgeTrashItem(item, true);
+  }
+  return expired.map((item) => item.id);
 }
 
 export async function deleteBookPermanently(bookId: string) {
   const db = firebaseDb();
-  const [lessons, teacherLessons] = await Promise.all([
+  const [lessons, teacherLessons, trash] = await Promise.all([
     getDocs(collection(db, "books", bookId, "lessons")),
     getDocs(collection(db, "books", bookId, "teacherLessons")),
+    getDocs(collection(db, "trash")),
   ]);
   await deleteMatchingAttempts((data) => data.bookId === bookId);
   await deleteSnapshots(lessons.docs);
   await deleteSnapshots(teacherLessons.docs);
+  await deleteSnapshots(
+    trash.docs.filter((item) => item.data().bookId === bookId),
+  );
   const batch = writeBatch(db);
   batch.delete(doc(db, "books", bookId));
   await batch.commit();
@@ -570,6 +738,110 @@ function queueLessonRelease(
       { merge: true },
     );
   });
+}
+
+function queueLessonWrite(batch: WriteBatch, lesson: LessonSummary) {
+  const db = firebaseDb();
+  const { lessonData, teacherContent } = lessonWriteData(lesson);
+  batch.set(
+    doc(db, "books", lesson.bookId, "lessons", lesson.id),
+    lessonData,
+    { merge: true },
+  );
+  const teacherReference = doc(
+    db,
+    "books",
+    lesson.bookId,
+    "teacherLessons",
+    lesson.id,
+  );
+  if (teacherContent.length > 0) {
+    batch.set(
+      teacherReference,
+      { content: clean(teacherContent), updatedAt: serverTimestamp() },
+      { merge: true },
+    );
+  } else {
+    batch.delete(teacherReference);
+  }
+}
+
+function createTrashItem(input: {
+  kind: TrashKind;
+  lesson: LessonSummary;
+  bookTitle: string;
+  label: string;
+  payload: HomeworkQuestion | LessonSummary;
+  questionId?: string;
+  position?: number;
+}): TrashItem {
+  const deletedAt = new Date();
+  const purgeAfter = new Date(deletedAt);
+  purgeAfter.setDate(purgeAfter.getDate() + 10);
+  const uniquePart = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id: [
+      input.kind,
+      safeIdPart(input.lesson.bookId),
+      safeIdPart(input.lesson.id),
+      uniquePart,
+    ].join("__"),
+    kind: input.kind,
+    bookId: input.lesson.bookId,
+    lessonId: input.lesson.id,
+    questionId: input.questionId,
+    bookTitle: input.bookTitle,
+    lessonOrder: input.lesson.order,
+    lessonTitle: input.lesson.title,
+    label: input.label,
+    deletedAt: deletedAt.toISOString(),
+    purgeAfter: purgeAfter.toISOString(),
+    position: input.position,
+    payload: clean(input.payload),
+  };
+}
+
+function queueAuditLog(
+  batch: WriteBatch,
+  item: TrashItem,
+  action: AuditAction,
+) {
+  const db = firebaseDb();
+  const occurredAt = new Date().toISOString();
+  const reference = doc(collection(db, "auditLogs"));
+  batch.set(reference, clean({
+    action,
+    kind: item.kind,
+    bookId: item.bookId,
+    lessonId: item.lessonId,
+    questionId: item.questionId,
+    label: item.label,
+    occurredAt,
+    actorUid: firebaseAuth().currentUser?.uid ?? "",
+  }));
+}
+
+function trashItemFromSnapshot(
+  id: string,
+  data: DocumentData,
+): TrashItem | null {
+  if (data.kind !== "homework" && data.kind !== "lesson") return null;
+  if (!data.payload || typeof data.payload !== "object") return null;
+  return {
+    id,
+    kind: data.kind,
+    bookId: String(data.bookId ?? ""),
+    lessonId: String(data.lessonId ?? ""),
+    questionId: data.questionId ? String(data.questionId) : undefined,
+    bookTitle: String(data.bookTitle ?? "Livro"),
+    lessonOrder: Number(data.lessonOrder ?? 0),
+    lessonTitle: String(data.lessonTitle ?? "Lesson"),
+    label: String(data.label ?? "Item"),
+    deletedAt: String(data.deletedAt ?? ""),
+    purgeAfter: String(data.purgeAfter ?? ""),
+    position: Number.isInteger(data.position) ? Number(data.position) : undefined,
+    payload: data.payload as HomeworkQuestion | LessonSummary,
+  };
 }
 
 function lessonWriteData(lesson: LessonSummary) {
