@@ -1,0 +1,79 @@
+name: Corrigir envio achatado
+
+on:
+  push:
+    paths:
+      - ".github/workflows/corrigir-upload.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  corrigir:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Restaurar estrutura correta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bad_commit="5a351ee127c8d9272a500a730b175f215b7e7a08"
+
+          test -f learning-platform.tsx
+          test -f globals.css
+          test -f firebase-learning-repository.ts
+
+          cp learning-platform.tsx app/learning-platform.tsx
+          cp globals.css app/globals.css
+          cp firebase-learning-repository.ts lib/firebase-learning-repository.ts
+
+          mapfile -t duplicate_files < <(
+            git diff-tree \
+              --no-commit-id \
+              --name-only \
+              --diff-filter=A \
+              -r "$bad_commit" |
+            awk 'index($0, "/") == 0'
+          )
+
+          if [ "${#duplicate_files[@]}" -ne 85 ]; then
+            echo "::error::Foram encontrados ${#duplicate_files[@]} arquivos, mas eram esperados 85."
+            exit 1
+          fi
+
+          git rm -- "${duplicate_files[@]}"
+          git rm .github/workflows/corrigir-upload.yml
+
+          git add \
+            app/learning-platform.tsx \
+            app/globals.css \
+            lib/firebase-learning-repository.ts
+
+          git diff --check
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Validar projeto corrigido
+        run: npm run check
+
+      - name: Salvar correção
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Corrigir estrutura do projeto e remover duplicados"
+          git push
