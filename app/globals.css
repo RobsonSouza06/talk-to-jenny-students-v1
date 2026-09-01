@@ -1214,7 +1214,7 @@ body.lesson-presentation-open {
   overflow-y: auto;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: #edf3f7;
   box-shadow: none;
 }
 
@@ -1246,13 +1246,13 @@ body.lesson-presentation-open {
 }
 
 .lesson-editor-card.presentation-mode .teacher-lesson-preview {
-  width: 100%;
-  min-height: calc(100dvh - 4rem);
+  width: min(calc(100% - 1.5rem), 72rem);
+  min-height: calc(100dvh - 6.5rem);
   flex: 1;
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
+  margin: 1rem auto 1.5rem;
+  border: 1px solid #d4e1ea;
+  border-radius: 0.95rem;
+  box-shadow: 0 12px 32px rgba(0, 52, 90, 0.1);
 }
 
 .table-subtitle {
@@ -2344,23 +2344,32 @@ body.lesson-presentation-open {
 }
 
 .learning-item > div {
-  display: flex;
+  display: grid;
   min-width: 0;
   flex: 1;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
+  grid-template-columns: fit-content(55%) minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(0.75rem, 1.2vw, 1.25rem);
+}
+
+.learning-item strong,
+.learning-item span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .learning-item strong {
   color: #173f80;
-  font-size: 0.72rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .learning-item span {
   color: #e30613;
-  font-size: 0.68rem;
-  text-align: right;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  text-align: left;
 }
 
 .learning-item button {
@@ -2372,9 +2381,22 @@ body.lesson-presentation-open {
 }
 
 .learning-section.reading .learning-item > div {
+  display: flex;
   align-items: flex-start;
   flex-direction: column;
   gap: 0.3rem;
+}
+
+.lesson-editor-card.presentation-mode .learning-item {
+  padding: 0.75rem 0.85rem;
+}
+
+.lesson-editor-card.presentation-mode .learning-item strong {
+  font-size: 0.9rem;
+}
+
+.lesson-editor-card.presentation-mode .learning-item span {
+  font-size: 0.84rem;
 }
 
 .learning-section.reading .learning-item strong {
@@ -2848,6 +2870,19 @@ body.lesson-presentation-open {
   .learning-section:not(.reading) .learning-item:nth-child(even) {
     padding-left: 0.9rem;
     box-shadow: inset 3px 0 0 rgba(0, 63, 112, 0.18);
+  }
+
+  .learning-section:not(.reading) .learning-items:has(> .learning-item:last-child:nth-child(odd))::after {
+    content: "";
+    box-shadow: inset 3px 0 0 rgba(0, 63, 112, 0.18);
+  }
+
+  .learning-section:not(.reading) .learning-items:has(> .learning-item:last-child:nth-child(4n + 1))::after {
+    background: #fff;
+  }
+
+  .learning-section:not(.reading) .learning-items:has(> .learning-item:last-child:nth-child(4n + 3))::after {
+    background: #edf2f6;
   }
 
   .answer-field {
