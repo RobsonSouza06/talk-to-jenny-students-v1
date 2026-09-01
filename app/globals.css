@@ -1212,6 +1212,8 @@ body.lesson-presentation-open {
   z-index: 80;
   inset: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
   border: 0;
   border-radius: 0;
   background: #edf3f7;
@@ -1248,7 +1250,7 @@ body.lesson-presentation-open {
 .lesson-editor-card.presentation-mode .teacher-lesson-preview {
   width: min(calc(100% - 1.5rem), 72rem);
   min-height: calc(100dvh - 6.5rem);
-  flex: 1;
+  flex: 0 0 auto;
   margin: 1rem auto 1.5rem;
   border: 1px solid #d4e1ea;
   border-radius: 0.95rem;
