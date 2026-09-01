@@ -14,6 +14,7 @@ import {
   ClipboardCheck,
   Database,
   Eye,
+  EyeOff,
   ExternalLink,
   FileQuestion,
   Gamepad2,
@@ -33,7 +34,6 @@ import {
   Save,
   ShieldCheck,
   Trash2,
-  Upload,
   UserPlus,
   Users,
   Volume2,
@@ -105,12 +105,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/sonner";
 
-import {
-  buildAudioTargetId,
-  createPreviewAudioAsset,
-  isAudioAvailableToStudent,
-  type AudioAsset,
-} from "@/lib/audio-storage";
 import {
   firebaseAuthUsersUrl,
   isFirebaseConfigured,
@@ -295,8 +289,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     questionId: string;
   } | null>(null);
   const [newStudentOpen, setNewStudentOpen] = useState(false);
-  const [audioDialogOpen, setAudioDialogOpen] = useState(false);
-  const [audioAssets, setAudioAssets] = useState<Record<string, AudioAsset>>({});
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -431,9 +423,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   );
   const homeworkComplete =
     selectedHomework.length > 0 && remainingHomework === 0;
-  const availableAudioCount = Object.values(audioAssets).filter(
-    isAudioAvailableToStudent,
-  ).length;
+  const availableAudioCount = lessons.reduce(
+    (total, lesson) => total + lessonAudioCount(lesson),
+    0,
+  );
 
   const studentProgress = activeStudent
     ? Math.min(
@@ -738,6 +731,15 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     const audience = form.get("audience") === "teacher"
       ? "teacher" as const
       : "student" as const;
+    const kind = form.get("kind") === "story"
+      ? "story" as const
+      : "standard" as const;
+    const rawAudioEmbed = String(form.get("audioEmbed") ?? "").trim();
+    const audioEmbedUrl = safeAudioComEmbedUrl(rawAudioEmbed);
+    if (rawAudioEmbed && !audioEmbedUrl) {
+      toast.error("Cole o código Share → Embed ou um link /embed/ válido do Audio.com.");
+      return;
+    }
     const englishLines = String(form.get("english") ?? "").split(/\r?\n/);
     const portugueseLines = String(form.get("portuguese") ?? "").split(/\r?\n/);
     const itemCount = Math.max(englishLines.length, portugueseLines.length);
@@ -753,6 +755,8 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       id: previousContent?.id ?? `section-${blockLesson.id}-${contentIndex + 1}`,
       title: name,
       items,
+      audioEmbedUrl: audioEmbedUrl || undefined,
+      kind,
       audience,
       order: contentIndex,
     };
@@ -763,7 +767,12 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     const sections = orderedContent
       .filter((section) => section.audience !== "teacher")
       .map((section) => section.title);
-    const updatedLesson = { ...blockLesson, sections, content: orderedContent };
+    const updatedLesson = {
+      ...blockLesson,
+      sections,
+      content: orderedContent,
+      audioCount: orderedContent.filter((section) => section.audioEmbedUrl).length,
+    };
     try {
       await saveLesson(updatedLesson);
       setLessons((current) =>
@@ -1018,16 +1027,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
             ),
           );
         }
-        setAudioAssets((current) =>
-          Object.fromEntries(
-            Object.entries(current).filter(
-              ([, asset]) => !(
-                asset.lessonId === deleteRequest.targetId
-                && asset.bookId === deleteRequest.bookId
-              ),
-            ),
-          ),
-        );
         const nextLesson = lessons
           .filter(
             (lesson) =>
@@ -1051,13 +1050,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         setBooks(remainingBooks);
         setLessons((current) =>
           current.filter((lesson) => lesson.bookId !== deleteRequest.targetId),
-        );
-        setAudioAssets((current) =>
-          Object.fromEntries(
-            Object.entries(current).filter(
-              ([, asset]) => asset.bookId !== deleteRequest.targetId,
-            ),
-          ),
         );
         if (nextBook) setSelectedBookId(nextBook.id);
         if (nextLesson) setSelectedLessonId(nextLesson.id);
@@ -1176,60 +1168,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     } catch {
       toast.error("Não foi possível salvar sua resposta.");
     }
-  }
-
-  function addAudio(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedTeacherLesson) return;
-    const form = new FormData(event.currentTarget);
-    const targetId = String(form.get("target") ?? "");
-    const file = form.get("audio");
-
-    if (!targetId || !(file instanceof File) || file.size === 0) {
-      toast.error("Escolha o local e o arquivo de áudio.");
-      return;
-    }
-    if (!file.type.startsWith("audio/")) {
-      toast.error("O arquivo precisa ser um áudio.");
-      return;
-    }
-    if (file.size > 15 * 1024 * 1024) {
-      toast.error("O áudio deve ter no máximo 15 MB.");
-      return;
-    }
-
-    const replacingExisting = Boolean(audioAssets[targetId]);
-    const previousAsset = audioAssets[targetId];
-    if (previousAsset?.provider === "preview" && previousAsset.playbackUrl) {
-      URL.revokeObjectURL(previousAsset.playbackUrl);
-    }
-
-    const asset = createPreviewAudioAsset({
-      bookId: selectedTeacherLesson.bookId,
-      lessonId: selectedTeacherLesson.id,
-      targetId,
-      file,
-    });
-    setAudioAssets((current) => ({ ...current, [targetId]: asset }));
-    if (!replacingExisting) {
-      setLessons((current) =>
-        current.map((lesson) =>
-          lesson.id === selectedTeacherLesson.id
-            && lesson.bookId === selectedTeacherLesson.bookId
-            ? { ...lesson, audioCount: lesson.audioCount + 1 }
-            : lesson,
-        ),
-      );
-    }
-    setAudioDialogOpen(false);
-    toast.success("Áudio pronto. O botão já aparece para o aluno.");
-    event.currentTarget.reset();
-  }
-
-  function playAudio(asset: AudioAsset) {
-    if (!isAudioAvailableToStudent(asset) || !asset.playbackUrl) return;
-    const audio = new Audio(asset.playbackUrl);
-    audio.play().catch(() => toast.error("Não foi possível reproduzir este áudio."));
   }
 
   const navigation = role === "teacher" ? teacherNavigation : studentNavigation;
@@ -1407,7 +1345,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                       actionLabel: "Mover para a lixeira",
                     })
                   }
-                  onAddAudio={() => setAudioDialogOpen(true)}
                   onAddBlock={(lesson) =>
                     setBlockEditor({
                       bookId: lesson.bookId,
@@ -1423,8 +1360,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                     })
                   }
                   onToggleStatus={toggleLessonStatus}
-                  audioAssets={audioAssets}
-                  onPlayAudio={playAudio}
                   onDelete={(lesson) =>
                     requestDelete({
                       kind: "lesson",
@@ -1516,8 +1451,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                   student={activeStudent}
                   selectedLesson={selectedStudentLesson}
                   onSelectLesson={setSelectedLessonId}
-                  audioAssets={audioAssets}
-                  onPlayAudio={playAudio}
                 />
               ) : null}
               {studentView === "homework" && activeStudent ? (
@@ -1768,15 +1701,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         lessons={lessons}
         onSubmit={addStudent}
       />
-      {selectedTeacherLesson ? (
-        <NewAudioDialog
-          open={audioDialogOpen}
-          onOpenChange={setAudioDialogOpen}
-          lesson={selectedTeacherLesson}
-          onSubmit={addAudio}
-        />
-      ) : null}
-
       <AlertDialog open={Boolean(deleteRequest)} onOpenChange={(open) => !open && setDeleteRequest(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -2111,12 +2035,9 @@ function TeacherContent({
   onNewHomework,
   onEditHomework,
   onDeleteHomework,
-  onAddAudio,
   onAddBlock,
   onEditBlock,
   onToggleStatus,
-  audioAssets,
-  onPlayAudio,
   onDelete,
 }: {
   books: BookSummary[];
@@ -2132,12 +2053,9 @@ function TeacherContent({
   onNewHomework: () => void;
   onEditHomework: (lesson: LessonSummary, questionId: string) => void;
   onDeleteHomework: (lesson: LessonSummary, question: HomeworkQuestion) => void;
-  onAddAudio: () => void;
   onAddBlock: (lesson: LessonSummary) => void;
   onEditBlock: (lesson: LessonSummary, index: number) => void;
   onToggleStatus: (lesson: LessonSummary) => void;
-  audioAssets: Record<string, AudioAsset>;
-  onPlayAudio: (asset: AudioAsset) => void;
   onDelete: (lesson: LessonSummary) => void;
 }) {
   const [lessonMode, setLessonMode] = useState<"organize" | "preview">("organize");
@@ -2283,8 +2201,14 @@ function TeacherContent({
                               <span className="block-icon">{section.title.toLowerCase().includes("home") || section.title.toLowerCase().includes("exercise") ? <ClipboardCheck /> : section.audience === "teacher" ? <LockKeyhole /> : <Layers3 />}</span>
                               <span>
                                 <strong>{section.title}</strong>
-                                <small>{section.audience === "teacher" ? "Somente professora" : "Aluno e professora"}</small>
+                                <small>
+                                  {isStorySection(section) ? "História" : "Conteúdo normal"}
+                                  {section.audience === "teacher" ? " · Somente professora" : " · Aluno e professora"}
+                                </small>
                               </span>
+                              {section.audioEmbedUrl ? (
+                                <span className="audio-linked-label"><Volume2 /> Áudio</span>
+                              ) : null}
                               <Button variant="ghost" size="icon" onClick={() => onEditBlock(selectedLesson, index)} aria-label={`Editar ${section.title}`}><PencilLine /></Button>
                             </div>
                           ))}
@@ -2293,8 +2217,14 @@ function TeacherContent({
 
                         <div className="audio-ready-row">
                           <div className="audio-ready-icon"><Headphones /></div>
-                          <div><strong>Áudios</strong><p>{selectedLesson.audioCount > 0 ? `${selectedLesson.audioCount} arquivo(s)` : "Nenhum áudio"}</p></div>
-                          <Button variant="outline" onClick={onAddAudio}><Upload /> Adicionar áudio</Button>
+                          <div>
+                            <strong>Áudios do Audio.com</strong>
+                            <p>
+                              {lessonAudioCount(selectedLesson) > 0
+                                ? `${lessonAudioCount(selectedLesson)} bloco(s) com áudio`
+                                : "Nenhum áudio · adicione pelo lápis de cada bloco"}
+                            </p>
+                          </div>
                         </div>
                       </>
                     ) : (
@@ -2311,9 +2241,8 @@ function TeacherContent({
                           </Badge>
                         </header>
                         <LessonContentSections
+                          key={`${selectedLesson.bookId}:${selectedLesson.id}:${previewRole}`}
                           lesson={{ ...selectedLesson, content: previewContent }}
-                          audioAssets={audioAssets}
-                          onPlayAudio={onPlayAudio}
                           showTeacherAudience={previewRole === "teacher"}
                         />
                       </article>
@@ -2497,7 +2426,7 @@ function TeacherData({
       <div className="storage-overview">
         <Card className="storage-card"><CardContent><span className="storage-icon"><BookOpenText /></span><div><p>Conteúdo do curso</p><strong>{lessons.length} lições</strong><small>estimativa: menos de 1 MB</small></div></CardContent></Card>
         <Card className="storage-card"><CardContent><span className="storage-icon red"><FileQuestion /></span><div><p>Respostas de alunos</p><strong>{totalAnswers} respostas</strong><small>estimativa: menos de 1 MB</small></div></CardContent></Card>
-        <Card className="storage-card"><CardContent><span className="storage-icon muted"><Headphones /></span><div><p>Áudios</p><strong>{audioCount} arquivos</strong><small>{audioCount > 0 ? "prontos para os alunos" : "nenhum arquivo cadastrado"}</small></div></CardContent></Card>
+        <Card className="storage-card"><CardContent><span className="storage-icon muted"><Headphones /></span><div><p>Áudios</p><strong>{audioCount} blocos</strong><small>{audioCount > 0 ? "com áudio disponível" : "nenhum áudio cadastrado"}</small></div></CardContent></Card>
       </div>
 
       <Card className="panel-card trash-card">
@@ -2698,35 +2627,20 @@ function StudentHome({
 
 function LessonContentSections({
   lesson,
-  audioAssets,
-  onPlayAudio,
   showTeacherAudience = false,
 }: {
   lesson: LessonSummary;
-  audioAssets: Record<string, AudioAsset>;
-  onPlayAudio: (asset: AudioAsset) => void;
   showTeacherAudience?: boolean;
 }) {
   const sections = lesson.content ?? [];
-  const availableLessonAudio = getAudioTargets(lesson).flatMap((target) => {
-    const asset = audioAssets[target.id];
-    return isAudioAvailableToStudent(asset) ? [{ target, asset }] : [];
-  });
+  const [activeAudioSection, setActiveAudioSection] = useState<string | null>(null);
+  const [revealedStories, setRevealedStories] = useState<Record<string, boolean>>({});
 
   if (sections.length === 0) {
     return (
       <div className="placeholder-lesson-content">
         <span><BookOpenText /></span>
         <h3>{lesson.sections.join(" · ")}</h3>
-        {availableLessonAudio.length > 0 ? (
-          <div className="lesson-audio-list">
-            {availableLessonAudio.map(({ target, asset }) => (
-              <Button variant="outline" key={target.id} onClick={() => onPlayAudio(asset)}>
-                <Volume2 /> {target.label}
-              </Button>
-            ))}
-          </div>
-        ) : null}
       </div>
     );
   }
@@ -2734,46 +2648,110 @@ function LessonContentSections({
   return (
     <div className="learning-sections">
       {sections.map((section) => {
-        const readingSection =
-          section.title === "Let’s Talk" || section.title.startsWith("Song");
+        const storySection = isStorySection(section);
+        const readingSection = storySection || section.title.startsWith("Song");
         const teacherOnly = section.audience === "teacher";
+        const audioEmbedUrl = safeAudioComEmbedUrl(section.audioEmbedUrl ?? "");
+        const hasAudio = Boolean(audioEmbedUrl);
+        const audioIsActive = hasAudio && activeAudioSection === section.id;
+        const storyTextIsVisible = !storySection
+          || !hasAudio
+          || revealedStories[section.id] === true;
+
+        function toggleAudio() {
+          if (!hasAudio) return;
+          setActiveAudioSection((current) => current === section.id ? null : section.id);
+        }
+
         return (
           <section
-            className={`learning-section ${readingSection ? "reading" : ""} ${teacherOnly ? "teacher-only" : ""}`}
+            className={`learning-section ${readingSection ? "reading" : ""} ${storySection ? "story" : ""} ${teacherOnly ? "teacher-only" : ""}`}
             key={section.id}
           >
             {showTeacherAudience && teacherOnly ? (
               <span className="teacher-only-label"><LockKeyhole /> Somente professora</span>
             ) : null}
-            <h3>{section.title}</h3>
-            <div className="learning-items">
-              {section.items.map((item, itemIndex) => {
-                const targetId = buildAudioTargetId(
-                  lesson.id,
-                  section.id,
-                  item.english,
-                );
-                const audioAsset = audioAssets[targetId];
-                return (
+
+            <div className="learning-section-title-row">
+              <h3>{section.title}</h3>
+              {hasAudio && !storySection ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className={audioIsActive ? "section-audio-button active" : "section-audio-button"}
+                  onClick={toggleAudio}
+                  aria-label={audioIsActive ? `Parar áudio de ${section.title}` : `Ouvir ${section.title}`}
+                  title={audioIsActive ? "Parar áudio" : "Ouvir este bloco"}
+                >
+                  <Volume2 />
+                </Button>
+              ) : null}
+            </div>
+
+            {storySection && hasAudio ? (
+              <div className="story-listening-panel">
+                <div className="story-listening-copy">
+                  <span><Headphones /></span>
+                  <div>
+                    <strong>Ouça antes de ler</strong>
+                    <small>Escute a história e revele o texto quando estiver pronto.</small>
+                  </div>
+                </div>
+                <div className="story-listening-actions">
+                  <Button
+                    type="button"
+                    variant={audioIsActive ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={toggleAudio}
+                  >
+                    <Volume2 /> {audioIsActive ? "Parar áudio" : "Ouvir história"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRevealedStories((current) => ({
+                      ...current,
+                      [section.id]: !current[section.id],
+                    }))}
+                  >
+                    {storyTextIsVisible ? <EyeOff /> : <Eye />}
+                    {storyTextIsVisible ? "Ocultar texto" : "Mostrar texto"}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {audioIsActive && audioEmbedUrl ? (
+              <div className="audio-embed-shell">
+                <iframe
+                  src={audioComAutoplayUrl(audioEmbedUrl)}
+                  title={`Áudio de ${section.title}`}
+                  allow="autoplay"
+                  loading="lazy"
+                />
+              </div>
+            ) : null}
+
+            {storyTextIsVisible ? (
+              <div className="learning-items">
+                {section.items.map((item, itemIndex) => (
                   <div className="learning-item" key={`${section.id}-${item.english}-${itemIndex}`}>
                     <div>
                       <strong>{item.english}</strong>
                       {item.portuguese ? <span>{item.portuguese}</span> : null}
                     </div>
-                    {isAudioAvailableToStudent(audioAsset) ? (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => onPlayAudio(audioAsset)}
-                        aria-label={`Ouvir ${item.english}`}
-                      >
-                        <Volume2 />
-                      </Button>
-                    ) : null}
                   </div>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <div className="story-text-hidden" role="status">
+                <EyeOff />
+                <strong>Texto oculto</strong>
+                <span>Ouça a história e use “Mostrar texto” quando quiser acompanhar a leitura.</span>
+              </div>
+            )}
           </section>
         );
       })}
@@ -2787,16 +2765,12 @@ function StudentLessons({
   student,
   selectedLesson,
   onSelectLesson,
-  audioAssets,
-  onPlayAudio,
 }: {
   lessons: LessonSummary[];
   book?: BookSummary;
   student: Student;
   selectedLesson?: LessonSummary;
   onSelectLesson: (id: string) => void;
-  audioAssets: Record<string, AudioAsset>;
-  onPlayAudio: (asset: AudioAsset) => void;
 }) {
   const [mobileLessonFocused, setMobileLessonFocused] = useState(false);
   const previousScrollPosition = useRef(0);
@@ -2887,9 +2861,8 @@ function StudentLessons({
             </header>
 
             <LessonContentSections
+              key={`${selectedLesson.bookId}:${selectedLesson.id}`}
               lesson={selectedLesson}
-              audioAssets={audioAssets}
-              onPlayAudio={onPlayAudio}
             />
           </article>
           </div>
@@ -2991,50 +2964,6 @@ function StudentHomework({
         ) : null}
       </div>
     </section>
-  );
-}
-
-function NewAudioDialog({
-  open,
-  onOpenChange,
-  lesson,
-  onSubmit,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  lesson: LessonSummary;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-  const targets = getAudioTargets(lesson);
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={onSubmit}>
-          <DialogHeader>
-            <DialogTitle>Adicionar áudio</DialogTitle>
-          </DialogHeader>
-          <div className="dialog-form">
-            <div className="field-stack">
-              <Label htmlFor="audio-target">Palavra, frase ou bloco</Label>
-              <select id="audio-target" name="target" className="native-select" defaultValue={targets[0]?.id}>
-                {targets.map((target) => (
-                  <option value={target.id} key={target.id}>{target.label}</option>
-                ))}
-              </select>
-            </div>
-            <div className="field-stack">
-              <Label htmlFor="audio-file">Arquivo</Label>
-              <Input id="audio-file" name="audio" type="file" accept="audio/*" required />
-              <small className="field-help">MP3, M4A, WAV, OGG ou WebM · máximo 15 MB</small>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
-            <Button type="submit"><Upload /> Salvar áudio</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -3184,6 +3113,21 @@ function BlockDialog({
                 Blocos exclusivos da professora são salvos em uma área separada e protegida.
               </small>
             </div>
+            <div className="field-stack">
+              <Label htmlFor="block-kind">Tipo de bloco</Label>
+              <select
+                id="block-kind"
+                name="kind"
+                className="native-select"
+                defaultValue={section && isStorySection(section) ? "story" : "standard"}
+              >
+                <option value="standard">Conteúdo normal</option>
+                <option value="story">História — ouvir antes de revelar o texto</option>
+              </select>
+              <small className="field-help">
+                Histórias com áudio começam com o texto oculto. Sem áudio, o texto aparece normalmente.
+              </small>
+            </div>
             <div className="form-grid two">
               <div className="field-stack">
                 <Label htmlFor="block-english">Inglês</Label>
@@ -3205,6 +3149,19 @@ function BlockDialog({
                 />
                 <small className="field-help">Uma tradução por linha</small>
               </div>
+            </div>
+            <div className="field-stack">
+              <Label htmlFor="block-audio-embed">Áudio do bloco (opcional)</Label>
+              <Textarea
+                id="block-audio-embed"
+                name="audioEmbed"
+                rows={3}
+                defaultValue={section?.audioEmbedUrl ?? ""}
+                placeholder="No Audio.com, use Share → Embed e cole aqui o código copiado"
+              />
+              <small className="field-help">
+                Aceita o código completo do player ou um endereço https://audio.com/embed/. Se ficar vazio, nenhum ícone de áudio aparecerá.
+              </small>
             </div>
           </div>
           <DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button><Button type="submit"><Save /> Salvar</Button></DialogFooter>
@@ -3424,25 +3381,54 @@ function safePracticeUrl(value = "") {
   }
 }
 
-function getAudioTargets(lesson: LessonSummary) {
-  const contentTargets = (lesson.content ?? []).flatMap((section) =>
-    section.items.map((item) => ({
-      id: buildAudioTargetId(
-        `${lesson.bookId}--${lesson.id}`,
-        section.id,
-        item.english,
-      ),
-      label: `${section.title} · ${item.english}`,
-    })),
-  );
-  if (contentTargets.length > 0) return contentTargets;
+function safeAudioComEmbedUrl(value = "") {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
 
-  return lesson.sections.map((section) => ({
-    id: buildAudioTargetId(
-      `${lesson.bookId}--${lesson.id}`,
-      section,
-      "section-audio",
-    ),
-    label: section,
-  }));
+  const iframeSource = trimmed.match(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/i)?.[1];
+  const candidate = (iframeSource ?? trimmed).replaceAll("&amp;", "&").trim();
+
+  try {
+    const url = new URL(candidate);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (
+      url.protocol !== "https:"
+      || hostname !== "audio.com"
+      || !url.pathname.startsWith("/embed/")
+    ) {
+      return "";
+    }
+    url.searchParams.delete("autoplay");
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function audioComAutoplayUrl(value: string) {
+  const safeUrl = safeAudioComEmbedUrl(value);
+  if (!safeUrl) return "";
+  const url = new URL(safeUrl);
+  url.searchParams.set("autoplay", "1");
+  return url.toString();
+}
+
+function isStorySection(section?: LearningSection) {
+  if (!section) return false;
+  if (section.kind === "story") return true;
+  if (section.kind === "standard") return false;
+  const normalizedTitle = section.title
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’']/g, "")
+    .toLowerCase();
+  return normalizedTitle.includes("lets talk")
+    || normalizedTitle.includes("story")
+    || normalizedTitle.includes("historia");
+}
+
+function lessonAudioCount(lesson: LessonSummary) {
+  return (lesson.content ?? []).filter(
+    (section) => Boolean(safeAudioComEmbedUrl(section.audioEmbedUrl ?? "")),
+  ).length;
 }

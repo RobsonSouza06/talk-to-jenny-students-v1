@@ -1071,7 +1071,7 @@ button:disabled {
 
 .content-block-row {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 0.65rem;
   border: 1px solid #e1e9f0;
@@ -1123,6 +1123,24 @@ button:disabled {
 .content-block-row small {
   color: var(--muted-foreground);
   font-size: 0.62rem;
+}
+
+.audio-linked-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  border-radius: 999px;
+  background: #e5eff7;
+  padding: 0.28rem 0.5rem;
+  color: #003f70;
+  font-size: 0.58rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.audio-linked-label svg {
+  width: 0.7rem;
+  height: 0.7rem;
 }
 
 .add-block-button {
@@ -2312,14 +2330,140 @@ body.lesson-presentation-open {
   height: 0.75rem;
 }
 
-.learning-section h3 {
+.learning-section-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
   margin-bottom: 0.55rem;
   border-bottom: 2px solid #e30613;
   padding-bottom: 0.35rem;
+}
+
+.learning-section-title-row h3 {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  border: 0;
+  padding: 0;
   color: #173f80;
   font-size: 0.84rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.section-audio-button {
+  color: #003f70;
+}
+
+.section-audio-button.active {
+  background: #dceaf4;
+  color: #003f70;
+}
+
+.story-listening-panel {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 0.7rem;
+  border: 1px solid #caddeb;
+  border-radius: 0.78rem;
+  background: #f2f8fc;
+  padding: 0.75rem;
+}
+
+.story-listening-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.story-listening-copy > span {
+  display: grid;
+  width: 2.15rem;
+  height: 2.15rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 0.65rem;
+  background: #dceaf4;
+  color: #003f70;
+}
+
+.story-listening-copy > span svg {
+  width: 1rem;
+}
+
+.story-listening-copy div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.story-listening-copy strong {
+  color: #173f80;
+  font-size: 0.72rem;
+}
+
+.story-listening-copy small {
+  color: #557084;
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+.story-listening-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.story-listening-actions button {
+  flex: 1 1 auto;
+}
+
+.audio-embed-shell {
+  overflow: hidden;
+  margin-bottom: 0.7rem;
+  border: 1px solid #d7e3ec;
+  border-radius: 0.78rem;
+  background: #fff;
+}
+
+.audio-embed-shell iframe {
+  display: block;
+  width: 100%;
+  height: 148px;
+  border: 0;
+}
+
+.story-text-hidden {
+  display: flex;
+  min-height: 8rem;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0.35rem;
+  border: 1px dashed #b8cad8;
+  border-radius: 0.78rem;
+  background: #f8fafc;
+  padding: 1.2rem;
+  color: #567184;
+  text-align: center;
+}
+
+.story-text-hidden svg {
+  width: 1.2rem;
+  color: #003f70;
+}
+
+.story-text-hidden strong {
+  color: #173f80;
+  font-size: 0.75rem;
+}
+
+.story-text-hidden span {
+  max-width: 28rem;
+  font-size: 0.64rem;
+  line-height: 1.45;
 }
 
 .learning-items {
@@ -2859,6 +3003,15 @@ body.lesson-presentation-open {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .story-listening-panel {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .story-listening-actions button {
+    flex: 0 0 auto;
+  }
+
   .learning-section:not(.reading) .learning-item:nth-child(4n + 1),
   .learning-section:not(.reading) .learning-item:nth-child(4n + 2) {
     background: #fff;
@@ -2902,6 +3055,19 @@ body.lesson-presentation-open {
 }
 
 @media (max-width: 699px) {
+  .audio-linked-label {
+    width: 1.8rem;
+    height: 1.8rem;
+    justify-content: center;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .audio-linked-label svg {
+    width: 0.82rem;
+    height: 0.82rem;
+  }
+
   .trash-item {
     grid-template-columns: auto minmax(0, 1fr);
   }

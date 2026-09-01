@@ -34,6 +34,8 @@ export type LearningSection = {
   id: string;
   title: string;
   items: LearningItem[];
+  audioEmbedUrl?: string;
+  kind?: "standard" | "story";
   audience?: "student" | "teacher";
   order?: number;
 };

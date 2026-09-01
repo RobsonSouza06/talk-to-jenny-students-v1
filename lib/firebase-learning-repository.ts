@@ -856,6 +856,8 @@ function lessonWriteData(lesson: LessonSummary) {
       id: section.id,
       title: section.title,
       items: section.items,
+      audioEmbedUrl: section.audioEmbedUrl,
+      kind: section.kind,
       order: section.order,
     }));
   const teacherContent = content.filter(
