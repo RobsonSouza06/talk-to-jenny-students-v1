@@ -1733,18 +1733,23 @@ body.lesson-presentation-open {
 }
 
 .block-dialog-content {
+  min-width: 0;
   max-height: calc(100dvh - 2rem);
   overflow: hidden;
 }
 
 .block-dialog-layout {
   display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
   max-height: calc(100dvh - 5rem);
   flex-direction: column;
 }
 
 .block-dialog-scroll {
+  width: 100%;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1758,15 +1763,23 @@ body.lesson-presentation-open {
 }
 
 .block-dialog-layout [data-slot="dialog-footer"] {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   border-top: 1px solid #e2e8ee;
   background: var(--background);
   padding-top: 0.85rem;
 }
 
 .block-audio-embed-input {
+  field-sizing: fixed;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 6rem;
   max-height: 9rem;
   overflow-y: auto;
+  overflow-wrap: anywhere;
   resize: vertical;
 }
 
