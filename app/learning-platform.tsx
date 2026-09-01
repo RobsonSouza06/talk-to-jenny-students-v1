@@ -3411,6 +3411,7 @@ function audioComAutoplayUrl(value: string) {
   if (!safeUrl) return "";
   const url = new URL(safeUrl);
   url.searchParams.set("autoplay", "1");
+  url.searchParams.set("footer", "false");
   return url.toString();
 }
 
