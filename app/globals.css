@@ -1203,6 +1203,58 @@ button:disabled {
   border: 1px solid #dce7ef;
 }
 
+body.lesson-presentation-open {
+  overflow: hidden;
+}
+
+.lesson-editor-card.presentation-mode {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+
+.lesson-editor-card.presentation-mode > [data-slot="card-header"],
+.lesson-editor-card.presentation-mode .lesson-status-line,
+.lesson-editor-card.presentation-mode .editor-actions {
+  display: none;
+}
+
+.lesson-editor-card.presentation-mode > [data-slot="card-content"] {
+  display: flex;
+  min-height: 100dvh;
+  flex-direction: column;
+  padding: 0;
+}
+
+.lesson-editor-card.presentation-mode .lesson-mode-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin: 0;
+  border-bottom: 1px solid #dce6ed;
+  border-radius: 0;
+  background: rgba(243, 247, 250, 0.97);
+  padding: 0.7rem clamp(0.75rem, 2vw, 1.5rem);
+  box-shadow: 0 6px 18px rgba(0, 42, 73, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.lesson-editor-card.presentation-mode .teacher-lesson-preview {
+  width: 100%;
+  min-height: calc(100dvh - 4rem);
+  flex: 1;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .table-subtitle {
   display: block;
   margin-top: 0.15rem;
@@ -2288,7 +2340,7 @@ button:disabled {
 }
 
 .learning-item:nth-child(even) {
-  background: #f6f8fa;
+  background: #edf2f6;
 }
 
 .learning-item > div {
@@ -2781,6 +2833,21 @@ button:disabled {
 
   .learning-items {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .learning-section:not(.reading) .learning-item:nth-child(4n + 1),
+  .learning-section:not(.reading) .learning-item:nth-child(4n + 2) {
+    background: #fff;
+  }
+
+  .learning-section:not(.reading) .learning-item:nth-child(4n + 3),
+  .learning-section:not(.reading) .learning-item:nth-child(4n + 4) {
+    background: #edf2f6;
+  }
+
+  .learning-section:not(.reading) .learning-item:nth-child(even) {
+    padding-left: 0.9rem;
+    box-shadow: inset 3px 0 0 rgba(0, 63, 112, 0.18);
   }
 
   .answer-field {

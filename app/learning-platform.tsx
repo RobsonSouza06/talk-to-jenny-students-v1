@@ -2146,6 +2146,23 @@ function TeacherContent({
   const previewContent = previewRole === "student"
     ? selectedBlocks.filter((section) => section.audience !== "teacher")
     : selectedBlocks;
+
+  useEffect(() => {
+    if (lessonMode !== "preview") return;
+
+    function leavePresentationMode(event: KeyboardEvent) {
+      if (event.key === "Escape") setLessonMode("organize");
+    }
+
+    document.body.classList.add("lesson-presentation-open");
+    document.addEventListener("keydown", leavePresentationMode);
+
+    return () => {
+      document.body.classList.remove("lesson-presentation-open");
+      document.removeEventListener("keydown", leavePresentationMode);
+    };
+  }, [lessonMode]);
+
   return (
     <section className="content-section">
       <PageHeading
@@ -2207,7 +2224,7 @@ function TeacherContent({
               </CardContent>
             </Card>
 
-            <Card className="panel-card lesson-editor-card">
+            <Card className={`panel-card lesson-editor-card ${lessonMode === "preview" ? "presentation-mode" : ""}`}>
               {selectedLesson ? (
                 <>
                   <CardHeader className="lesson-editor-header">
