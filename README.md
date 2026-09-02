@@ -11,5 +11,3 @@ O aplicativo funciona em computadores e celulares e pode ser instalado como
 PWA.
 
 Desenvolvido com Next.js e Firebase.
-
-

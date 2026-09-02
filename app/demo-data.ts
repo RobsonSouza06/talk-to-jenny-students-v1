@@ -15,6 +15,7 @@ export type Student = {
   name: string;
   email: string;
   initials: string;
+  bookAccess?: Record<string, number>;
   currentBook: number;
   currentLesson: number;
   answered: number;

@@ -20,6 +20,7 @@ import {
   where,
   writeBatch,
   type DocumentData,
+  type DocumentSnapshot,
   type QueryDocumentSnapshot,
   type Unsubscribe,
   type WriteBatch,
@@ -177,22 +178,32 @@ export async function loadStudentWorkspace(uid: string): Promise<WorkspaceData> 
     throw new Error("Este acesso está desativado.");
   }
 
-  const booksSnapshot = await getDocs(
-    query(
-      collection(db, "books"),
-      where("published", "==", true),
-      where("order", "<=", student.currentBook),
-    ),
-  );
-  const books = booksSnapshot.docs
-    .map(bookFromSnapshot)
-    .filter((book) => book.published !== false)
-    .sort(byOrder);
+  const explicitBookIds = Object.keys(student.bookAccess ?? {});
+  const books = explicitBookIds.length > 0
+    ? (await Promise.all(
+        explicitBookIds.map((bookId) => getDoc(doc(db, "books", bookId))),
+      ))
+        .filter((snapshot) => snapshot.exists())
+        .map(bookFromSnapshot)
+        .filter((book) => book.published !== false)
+        .sort(byOrder)
+    : (await getDocs(
+        query(
+          collection(db, "books"),
+          where("published", "==", true),
+          where("order", "<=", student.currentBook),
+        ),
+      )).docs
+        .map(bookFromSnapshot)
+        .filter((book) => book.published !== false)
+        .sort(byOrder);
   const lessonGroups = await Promise.all(
     books.map(async (book) => {
-      const maximumLesson = book.order < student.currentBook
-        ? Number.MAX_SAFE_INTEGER
-        : student.currentLesson;
+      const maximumLesson = explicitBookIds.length > 0
+        ? student.bookAccess?.[book.id] ?? 0
+        : book.order < student.currentBook
+          ? Number.MAX_SAFE_INTEGER
+          : student.currentLesson;
       const snapshot = await getDocs(
         query(
           collection(db, "books", book.id, "lessons"),
@@ -329,17 +340,22 @@ export async function createStudentProfile(input: {
   uid: string;
   name: string;
   email: string;
-  bookId: string;
+  bookAccess: Record<string, number>;
   currentBook: number;
   currentLesson: number;
 }) {
   const uid = input.uid.trim();
   const initials = initialsFor(input.name);
   const db = firebaseDb();
-  const [userSnapshot, studentSnapshot, lessonSnapshots] = await Promise.all([
+  const [userSnapshot, studentSnapshot, lessonSnapshotGroups] = await Promise.all([
     getDoc(doc(db, "users", uid)),
     getDoc(doc(db, "students", uid)),
-    getDocs(collection(db, "books", input.bookId, "lessons")),
+    Promise.all(
+      Object.keys(input.bookAccess).map(async (bookId) => ({
+        bookId,
+        snapshots: await getDocs(collection(db, "books", bookId, "lessons")),
+      })),
+    ),
   ]);
   if (userSnapshot.exists() || studentSnapshot.exists()) {
     throw new Error("student-profile-already-exists");
@@ -357,6 +373,7 @@ export async function createStudentProfile(input: {
     name: input.name,
     email: input.email,
     initials,
+    bookAccess: input.bookAccess,
     currentBook: input.currentBook,
     currentLesson: input.currentLesson,
     lastAccess: "",
@@ -364,13 +381,16 @@ export async function createStudentProfile(input: {
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  queueLessonRelease(batch, lessonSnapshots.docs, input.currentLesson);
+  lessonSnapshotGroups.forEach(({ bookId, snapshots }) => {
+    queueLessonRelease(batch, snapshots.docs, input.bookAccess[bookId] ?? 0);
+  });
   await batch.commit();
 
   return studentFromSnapshot(uid, {
     name: input.name,
     email: input.email,
     initials,
+    bookAccess: input.bookAccess,
     currentBook: input.currentBook,
     currentLesson: input.currentLesson,
     lastAccess: "",
@@ -380,21 +400,27 @@ export async function createStudentProfile(input: {
 
 export async function updateStudentProgress(input: {
   studentId: string;
-  bookId: string;
+  bookAccess: Record<string, number>;
   currentBook: number;
   currentLesson: number;
 }) {
   const db = firebaseDb();
-  const lessonSnapshots = await getDocs(
-    collection(db, "books", input.bookId, "lessons"),
+  const lessonSnapshotGroups = await Promise.all(
+    Object.keys(input.bookAccess).map(async (bookId) => ({
+      bookId,
+      snapshots: await getDocs(collection(db, "books", bookId, "lessons")),
+    })),
   );
   const batch = writeBatch(db);
   batch.update(doc(db, "students", input.studentId), {
+    bookAccess: input.bookAccess,
     currentBook: input.currentBook,
     currentLesson: input.currentLesson,
     updatedAt: serverTimestamp(),
   });
-  queueLessonRelease(batch, lessonSnapshots.docs, input.currentLesson);
+  lessonSnapshotGroups.forEach(({ bookId, snapshots }) => {
+    queueLessonRelease(batch, snapshots.docs, input.bookAccess[bookId] ?? 0);
+  });
   await batch.commit();
 }
 
@@ -694,9 +720,9 @@ async function deleteSnapshots(
 }
 
 function bookFromSnapshot(
-  snapshot: QueryDocumentSnapshot<DocumentData, DocumentData>,
+  snapshot: DocumentSnapshot<DocumentData, DocumentData>,
 ): BookSummary {
-  const data = snapshot.data();
+  const data = snapshot.data() ?? {};
   return {
     id: snapshot.id,
     order: Number(data.order ?? 1),
@@ -952,12 +978,25 @@ function studentFromSnapshot(id: string, data: DocumentData): Student {
     name: String(data.name ?? "Aluno"),
     email: String(data.email ?? ""),
     initials: String(data.initials ?? initialsFor(String(data.name ?? "Aluno"))),
+    bookAccess: bookAccessFromData(data.bookAccess),
     currentBook: Number(data.currentBook ?? 1),
     currentLesson: Number(data.currentLesson ?? 1),
     answered: Number(data.answered ?? 0),
     lastAccess: formatLastAccess(data.lastAccess),
     active: data.active !== false,
   };
+}
+
+function bookAccessFromData(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([bookId, lesson]) => (
+      Boolean(bookId)
+      && Number.isInteger(Number(lesson))
+      && Number(lesson) > 0
+    ))
+    .map(([bookId, lesson]) => [bookId, Number(lesson)] as const);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function formatLastAccess(value: unknown) {

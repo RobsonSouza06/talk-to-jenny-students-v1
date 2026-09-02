@@ -1,5 +1,6 @@
 export type StudentProgressUpdate = {
   studentId: string;
+  bookAccess: Record<string, number>;
   currentBook: number;
   currentLesson: number;
 };

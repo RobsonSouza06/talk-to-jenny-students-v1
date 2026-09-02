@@ -176,6 +176,82 @@ function matchesLesson(lesson: LessonSummary, key?: LessonKey | null) {
   );
 }
 
+function studentBookAccess(
+  student: Student,
+  books: BookSummary[],
+  lessons: LessonSummary[],
+) {
+  const explicitAccess = Object.fromEntries(
+    Object.entries(student.bookAccess ?? {}).filter(([bookId, lessonLimit]) => (
+      books.some((book) => book.id === bookId)
+      && Number.isInteger(lessonLimit)
+      && lessonLimit > 0
+    )),
+  );
+  if (Object.keys(explicitAccess).length > 0) return explicitAccess;
+
+  return Object.fromEntries(
+    books
+      .filter((book) => book.order <= student.currentBook)
+      .map((book) => {
+        const maximumLesson = Math.max(
+          1,
+          ...lessons
+            .filter((lesson) => lesson.bookId === book.id)
+            .map((lesson) => lesson.order),
+        );
+        return [
+          book.id,
+          book.order < student.currentBook
+            ? maximumLesson
+            : student.currentLesson,
+        ];
+      }),
+  );
+}
+
+function primaryBookForAccess(
+  access: Record<string, number>,
+  books: BookSummary[],
+) {
+  return books
+    .filter((book) => access[book.id] !== undefined)
+    .sort((a, b) => b.order - a.order)[0];
+}
+
+function studentAccessSummary(
+  student: Student,
+  books: BookSummary[],
+  lessons: LessonSummary[],
+) {
+  const access = studentBookAccess(student, books, lessons);
+  const entries = books
+    .filter((book) => access[book.id] !== undefined)
+    .sort((a, b) => a.order - b.order)
+    .map((book) => `Livro ${book.order} · Lesson ${access[book.id]}`);
+  return entries.join(" | ") || `Livro ${student.currentBook} · Lesson ${student.currentLesson}`;
+}
+
+function accessFromStudentForm(
+  form: FormData,
+  books: BookSummary[],
+  lessons: LessonSummary[],
+) {
+  const selectedBookIds = new Set(form.getAll("bookAccess").map(String));
+  return Object.fromEntries(
+    books
+      .filter((book) => selectedBookIds.has(book.id))
+      .map((book) => {
+        const availableOrders = lessons
+          .filter((lesson) => lesson.bookId === book.id)
+          .map((lesson) => lesson.order);
+        const maximumLesson = Math.max(1, ...availableOrders);
+        const requestedLesson = Number(form.get(`bookLesson:${book.id}`) ?? 1);
+        return [book.id, Math.min(Math.max(requestedLesson, 1), maximumLesson)];
+      }),
+  );
+}
+
 function studentAttemptState(attempts: Record<string, StudentAttempt>) {
   return {
     answers: Object.fromEntries(
@@ -273,8 +349,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     accountRole === "student" ? session.user.uid : "",
   );
   const [managedStudentId, setManagedStudentId] = useState<string | null>(null);
-  const [draftBook, setDraftBook] = useState("1");
-  const [draftLesson, setDraftLesson] = useState("1");
+  const [draftBookAccess, setDraftBookAccess] = useState<Record<string, number>>({});
   const [selectedBookId, setSelectedBookId] = useState("book-1");
   const [selectedLessonId, setSelectedLessonId] = useState("lesson-1");
   const [newBookOpen, setNewBookOpen] = useState(false);
@@ -378,22 +453,34 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   const selectedTeacherLesson =
     selectedBookLessons.find((lesson) => lesson.id === selectedLessonId)
     ?? selectedBookLessons[0];
-  const activeBook = books.find((book) => book.order === activeStudent?.currentBook) ?? books[0];
+  const activeStudentBookAccess = activeStudent
+    ? studentBookAccess(activeStudent, books, lessons)
+    : {};
+  const availableStudentBooks = books.filter(
+    (book) => activeStudentBookAccess[book.id] !== undefined,
+  );
+  const activeBook = availableStudentBooks.find((book) => book.id === selectedBookId)
+    ?? availableStudentBooks.find((book) => book.order === activeStudent?.currentBook)
+    ?? availableStudentBooks.at(-1)
+    ?? books[0];
+  const activeLessonLimit = activeStudentBookAccess[activeBook?.id]
+    ?? activeStudent?.currentLesson
+    ?? 1;
   const activeBookLessons = lessons
     .filter((lesson) => lesson.bookId === activeBook?.id)
     .sort((a, b) => a.order - b.order);
-  const currentStudentLesson =
-    activeBookLessons.find((lesson) => lesson.order === activeStudent?.currentLesson)
-    ?? activeBookLessons[0];
   const availableStudentLessons = activeBookLessons.filter(
     (lesson) =>
-      lesson.order <= (activeStudent?.currentLesson ?? 0)
+      lesson.order <= activeLessonLimit
       && lesson.status === "published",
   );
+  const currentStudentLesson =
+    availableStudentLessons.find((lesson) => lesson.order === activeLessonLimit)
+    ?? availableStudentLessons.at(-1);
   const selectedStudentLesson =
-    activeBookLessons.find((lesson) => lesson.id === selectedLessonId)
+    availableStudentLessons.find((lesson) => lesson.id === selectedLessonId)
     ?? currentStudentLesson
-    ?? activeBookLessons[0];
+    ?? availableStudentLessons[0];
   const editingBook = books.find((book) => book.id === editingBookId);
   const editingLesson = lessons.find((lesson) =>
     matchesLesson(lesson, editingLessonKey),
@@ -405,10 +492,6 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     (question) => question.id === editingHomework?.questionId,
   );
   const blockLesson = lessons.find((lesson) => matchesLesson(lesson, blockEditor));
-  const draftBookRecord = books.find((book) => book.order === Number(draftBook));
-  const draftBookLessons = lessons
-    .filter((lesson) => lesson.bookId === draftBookRecord?.id)
-    .sort((a, b) => a.order - b.order);
   const totalAnswers = students.reduce((total, student) => total + student.answered, 0);
   const homeworkLesson = studentView === "home"
     ? currentStudentLesson
@@ -432,11 +515,11 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     ? Math.min(
         100,
         Math.round(
-          (activeStudent.currentLesson
+          (activeLessonLimit
             / Math.max(
               activeBook?.lessonCount ?? 0,
               activeBookLessons.length,
-              activeStudent.currentLesson,
+              activeLessonLimit,
               1,
             ))
             * 100,
@@ -445,12 +528,16 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     : 0;
 
   function findStudentLesson(student: Student) {
-    const book = books.find((item) => item.order === student.currentBook);
+    const access = studentBookAccess(student, books, lessons);
+    const book = books.find((item) => item.order === student.currentBook)
+      ?? primaryBookForAccess(access, books);
+    const lessonLimit = access[book?.id ?? ""] ?? student.currentLesson;
     const bookLessons = lessons
       .filter((lesson) => lesson.bookId === book?.id)
       .sort((a, b) => a.order - b.order);
     return (
-      bookLessons.find((lesson) => lesson.order === student.currentLesson)
+      bookLessons.find((lesson) => lesson.order === lessonLimit)
+      ?? bookLessons.filter((lesson) => lesson.order <= lessonLimit).at(-1)
       ?? bookLessons[0]
     );
   }
@@ -461,6 +548,22 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       .filter((lesson) => lesson.bookId === bookId)
       .sort((a, b) => a.order - b.order)[0];
     if (firstLesson) setSelectedLessonId(firstLesson.id);
+  }
+
+  function selectStudentBook(bookId: string) {
+    if (activeStudentBookAccess[bookId] === undefined) return;
+    setSelectedBookId(bookId);
+    const lessonLimit = activeStudentBookAccess[bookId];
+    const bookLessons = lessons
+      .filter((lesson) => (
+        lesson.bookId === bookId
+        && lesson.order <= lessonLimit
+        && lesson.status === "published"
+      ))
+      .sort((a, b) => a.order - b.order);
+    const nextLesson = bookLessons.find((lesson) => lesson.order === lessonLimit)
+      ?? bookLessons.at(-1);
+    setSelectedLessonId(nextLesson?.id ?? "");
   }
 
   function openCurrentStudentView(view: StudentView) {
@@ -498,31 +601,39 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     if (nextRole === "student") {
       setStudentView("home");
       const lesson = activeStudent ? findStudentLesson(activeStudent) : undefined;
-      if (lesson) setSelectedLessonId(lesson.id);
+      if (lesson) {
+        setSelectedBookId(lesson.bookId);
+        setSelectedLessonId(lesson.id);
+      }
       if (activeStudent) void loadPreviewAttemptState(activeStudent.id);
     }
   }
 
   function openStudent(student: Student) {
     setManagedStudentId(student.id);
-    setDraftBook(String(student.currentBook));
-    setDraftLesson(String(student.currentLesson));
+    setDraftBookAccess(studentBookAccess(student, books, lessons));
   }
 
   async function saveStudentProgress() {
-    if (!managedStudent || !draftBookRecord) return;
-    const nextBook = Number(draftBook);
-    const nextLesson = Number(draftLesson);
+    if (!managedStudent) return;
+    const primaryBook = primaryBookForAccess(draftBookAccess, books);
+    if (!primaryBook) {
+      toast.error("Selecione pelo menos um livro para o aluno.");
+      return;
+    }
+    const nextBook = primaryBook.order;
+    const nextLesson = draftBookAccess[primaryBook.id];
     try {
       await updateStudentProgress({
         studentId: managedStudent.id,
-        bookId: draftBookRecord.id,
+        bookAccess: draftBookAccess,
         currentBook: nextBook,
         currentLesson: nextLesson,
       });
       setLessons((current) =>
         current.map((lesson) =>
-          lesson.bookId === draftBookRecord.id && lesson.order <= nextLesson
+          draftBookAccess[lesson.bookId] !== undefined
+            && lesson.order <= draftBookAccess[lesson.bookId]
             ? { ...lesson, status: "published" }
             : lesson,
         ),
@@ -530,7 +641,12 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       setStudents((current) =>
         current.map((student) =>
           student.id === managedStudent.id
-            ? { ...student, currentBook: nextBook, currentLesson: nextLesson }
+            ? {
+                ...student,
+                bookAccess: draftBookAccess,
+                currentBook: nextBook,
+                currentLesson: nextLesson,
+              }
             : student,
         ),
       );
@@ -547,7 +663,10 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     setStudentView("home");
     void loadPreviewAttemptState(student.id);
     const lesson = findStudentLesson(student);
-    if (lesson) setSelectedLessonId(lesson.id);
+    if (lesson) {
+      setSelectedBookId(lesson.bookId);
+      setSelectedLessonId(lesson.id);
+    }
   }
 
   async function addBook(event: FormEvent<HTMLFormElement>) {
@@ -884,11 +1003,15 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     const uid = String(form.get("uid") ?? "").trim();
     const name = String(form.get("name") ?? "").trim();
     const email = String(form.get("email") ?? "").trim();
-    const initialBookId = String(form.get("book") ?? books[0]?.id);
-    const initialBook = books.find((book) => book.id === initialBookId) ?? books[0];
-    const initialLesson = Number(form.get("lesson") ?? 1);
+    const bookAccess = accessFromStudentForm(form, books, lessons);
+    const initialBook = primaryBookForAccess(bookAccess, books);
+    const initialLesson = initialBook ? bookAccess[initialBook.id] : 1;
     if (!uid || uid.length > 128 || uid.includes("/") || !name || !email) {
       toast.error("Preencha o UID, o nome e o e-mail da conta criada no Firebase.");
+      return;
+    }
+    if (!initialBook) {
+      toast.error("Selecione pelo menos um livro para o aluno.");
       return;
     }
     try {
@@ -896,13 +1019,14 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         uid,
         name,
         email,
-        bookId: initialBook?.id ?? "",
-        currentBook: initialBook?.order ?? 1,
+        bookAccess,
+        currentBook: initialBook.order,
         currentLesson: initialLesson,
       });
       setLessons((current) =>
         current.map((lesson) =>
-          lesson.bookId === initialBook?.id && lesson.order <= initialLesson
+          bookAccess[lesson.bookId] !== undefined
+            && lesson.order <= bookAccess[lesson.bookId]
             ? { ...lesson, status: "published" }
             : lesson,
         ),
@@ -1436,6 +1560,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                   student={activeStudent}
                   book={activeBook}
                   lesson={currentStudentLesson}
+                  lessonLimit={activeLessonLimit}
                   progress={studentProgress}
                   homeworkRemaining={remainingHomework}
                   homeworkComplete={homeworkComplete}
@@ -1448,20 +1573,25 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                 <StudentLessons
                   lessons={activeBookLessons}
                   book={activeBook}
+                  books={availableStudentBooks}
                   student={activeStudent}
+                  lessonLimit={activeLessonLimit}
                   selectedLesson={selectedStudentLesson}
+                  onSelectBook={selectStudentBook}
                   onSelectLesson={setSelectedLessonId}
                 />
               ) : null}
               {studentView === "homework" && activeStudent ? (
                 <StudentHomework
                   book={activeBook}
+                  books={availableStudentBooks}
                   lesson={selectedStudentLesson}
                   lessons={availableStudentLessons}
                   questions={selectedHomework}
                   answers={answers}
                   revealedAnswers={revealedAnswers}
                   completed={completedHomework}
+                  onSelectBook={selectStudentBook}
                   onSelectLesson={setSelectedLessonId}
                   onAnswer={(questionId, answer) =>
                     setAnswers((current) => ({ ...current, [questionId]: answer }))
@@ -1526,44 +1656,13 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
                     </div>
                     <ShieldCheck />
                   </div>
-                  <div className="form-grid two">
-                    <div className="field-stack">
-                      <Label>Livro atual</Label>
-                      <Select
-                        value={draftBook}
-                        onValueChange={(value) => {
-                          setDraftBook(value);
-                          const book = books.find((item) => item.order === Number(value));
-                          const firstLesson = lessons
-                            .filter((lesson) => lesson.bookId === book?.id)
-                            .sort((a, b) => a.order - b.order)[0];
-                          setDraftLesson(String(firstLesson?.order ?? 1));
-                        }}
-                      >
-                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {books.map((book) => (
-                            <SelectItem value={String(book.order)} key={book.id}>
-                              {book.title}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="field-stack">
-                      <Label>Até a lição</Label>
-                      <Select value={draftLesson} onValueChange={setDraftLesson}>
-                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {draftBookLessons.map((lesson) => (
-                            <SelectItem value={String(lesson.order)} key={lesson.id}>
-                              Lesson {lesson.order}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
+                  <BookAccessEditor
+                    books={books}
+                    lessons={lessons}
+                    value={draftBookAccess}
+                    onChange={setDraftBookAccess}
+                    idPrefix="edit-student"
+                  />
                   <Button className="w-full" onClick={saveStudentProgress}><Save /> Salvar progresso</Button>
                 </section>
 
@@ -1694,13 +1793,15 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
           onSubmit={updateHomework}
         />
       ) : null}
-      <NewStudentDialog
-        open={newStudentOpen}
-        onOpenChange={setNewStudentOpen}
-        books={books}
-        lessons={lessons}
-        onSubmit={addStudent}
-      />
+      {newStudentOpen ? (
+        <NewStudentDialog
+          open
+          onOpenChange={setNewStudentOpen}
+          books={books}
+          lessons={lessons}
+          onSubmit={addStudent}
+        />
+      ) : null}
       <AlertDialog open={Boolean(deleteRequest)} onOpenChange={(open) => !open && setDeleteRequest(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -2356,9 +2457,12 @@ function TeacherStudents({
   onOpenStudent: (student: Student) => void;
 }) {
   function progressFor(student: Student) {
-    const book = books.find((item) => item.order === student.currentBook);
+    const access = studentBookAccess(student, books, lessons);
+    const book = books.find((item) => item.order === student.currentBook)
+      ?? primaryBookForAccess(access, books);
     const lessonCount = lessons.filter((lesson) => lesson.bookId === book?.id).length;
-    return (student.currentLesson / Math.max(lessonCount, 1)) * 100;
+    const lessonLimit = access[book?.id ?? ""] ?? student.currentLesson;
+    return (lessonLimit / Math.max(lessonCount, 1)) * 100;
   }
   return (
     <section className="content-section">
@@ -2373,7 +2477,7 @@ function TeacherStudents({
                 {students.map((student) => (
                   <TableRow key={student.id}>
                     <TableCell><div className="student-cell"><span className="student-avatar">{student.initials}</span><span><strong>{student.name}</strong><small>{student.email}</small></span></div></TableCell>
-                    <TableCell><div className="progress-cell"><strong>Livro {student.currentBook} · Lesson {student.currentLesson}</strong><Progress value={progressFor(student)} /></div></TableCell>
+                    <TableCell><div className="progress-cell"><strong>{studentAccessSummary(student, books, lessons)}</strong><Progress value={progressFor(student)} /></div></TableCell>
                     <TableCell>{student.answered}</TableCell>
                     <TableCell>{student.lastAccess}</TableCell>
                     <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => onOpenStudent(student)}>Gerenciar</Button></TableCell>
@@ -2386,7 +2490,7 @@ function TeacherStudents({
             {students.map((student) => (
               <button key={student.id} className="mobile-student-card" onClick={() => onOpenStudent(student)}>
                 <span className="student-avatar">{student.initials}</span>
-                <span><strong>{student.name}</strong><small>Livro {student.currentBook} · Lesson {student.currentLesson}</small><Progress value={progressFor(student)} /></span>
+                <span><strong>{student.name}</strong><small>{studentAccessSummary(student, books, lessons)}</small><Progress value={progressFor(student)} /></span>
                 <ChevronRight />
               </button>
             ))}
@@ -2549,6 +2653,7 @@ function StudentHome({
   student,
   book,
   lesson,
+  lessonLimit,
   progress,
   homeworkRemaining,
   homeworkComplete,
@@ -2559,6 +2664,7 @@ function StudentHome({
   student: Student;
   book?: BookSummary;
   lesson?: LessonSummary;
+  lessonLimit: number;
   progress: number;
   homeworkRemaining: number;
   homeworkComplete: boolean;
@@ -2577,7 +2683,7 @@ function StudentHome({
             <div className="continue-copy">
               <Badge>Book {book?.order ?? student.currentBook}</Badge>
               <p className="continue-kicker">Continue studying</p>
-              <h2>Lesson {student.currentLesson}{lesson?.title ? ` · ${lesson.title}` : ""}</h2>
+              <h2>Lesson {lessonLimit}{lesson?.title ? ` · ${lesson.title}` : ""}</h2>
               <p>Review the lesson, listen to the words and complete your homework.</p>
               <Button onClick={onOpenLesson}><Play /> Open lesson</Button>
             </div>
@@ -2590,7 +2696,7 @@ function StudentHome({
             <span className="homework-icon"><ClipboardCheck /></span>
             <div>
               <p>Homework</p>
-              <h3>Lesson {lesson?.order ?? student.currentLesson}</h3>
+              <h3>Lesson {lesson?.order ?? lessonLimit}</h3>
               <span className={homeworkComplete ? "homework-status-complete" : ""}>
                 {(lesson?.homework?.length ?? 0) === 0
                   ? "No questions yet"
@@ -2605,7 +2711,7 @@ function StudentHome({
       </div>
 
       <div className={`student-overview-grid ${practiceUrl ? "" : "single"}`}>
-        <Card className="panel-card unlocked-card"><CardHeader className="panel-header"><div><p className="panel-kicker">Available now</p><CardTitle>Your lessons</CardTitle></div><Button variant="ghost" onClick={onOpenLesson}>See all <ArrowRight /></Button></CardHeader><CardContent className="unlocked-list">{Array.from({ length: student.currentLesson }, (_, index) => index + 1).slice(-3).map((lessonOrder) => <button key={lessonOrder} onClick={() => onOpenLessonNumber(lessonOrder)}><span className="lesson-number">{lessonOrder}</span><span><strong>Lesson {lessonOrder}</strong><small>{lessonOrder === student.currentLesson ? "Current lesson" : "Available for review"}</small></span><CheckCircle2 /></button>)}</CardContent></Card>
+        <Card className="panel-card unlocked-card"><CardHeader className="panel-header"><div><p className="panel-kicker">Available now</p><CardTitle>Your lessons</CardTitle></div><Button variant="ghost" onClick={onOpenLesson}>See all <ArrowRight /></Button></CardHeader><CardContent className="unlocked-list">{Array.from({ length: lessonLimit }, (_, index) => index + 1).slice(-3).map((lessonOrder) => <button key={lessonOrder} onClick={() => onOpenLessonNumber(lessonOrder)}><span className="lesson-number">{lessonOrder}</span><span><strong>Lesson {lessonOrder}</strong><small>{lessonOrder === lessonLimit ? "Current lesson" : "Available for review"}</small></span><CheckCircle2 /></button>)}</CardContent></Card>
         {practiceUrl ? (
           <Card className="practice-card">
             <CardContent>
@@ -2762,14 +2868,20 @@ function LessonContentSections({
 function StudentLessons({
   lessons,
   book,
+  books,
   student,
+  lessonLimit,
   selectedLesson,
+  onSelectBook,
   onSelectLesson,
 }: {
   lessons: LessonSummary[];
   book?: BookSummary;
+  books: BookSummary[];
   student: Student;
+  lessonLimit: number;
   selectedLesson?: LessonSummary;
+  onSelectBook: (id: string) => void;
   onSelectLesson: (id: string) => void;
 }) {
   const [mobileLessonFocused, setMobileLessonFocused] = useState(false);
@@ -2779,7 +2891,7 @@ function StudentLessons({
   const practiceLabel = book?.practiceLabel?.trim() || "Play and practice";
   const selectedIsAvailable = Boolean(
     selectedLesson
-      && selectedLesson.order <= student.currentLesson
+      && selectedLesson.order <= lessonLimit
       && selectedLesson.status === "published",
   );
   useEffect(() => {
@@ -2813,7 +2925,14 @@ function StudentLessons({
 
   return (
     <section className="content-section">
-      <PageHeading eyebrow={`Book ${student.currentBook}`} title="My lessons" description={`You can study up to Lesson ${student.currentLesson}.`} />
+      <PageHeading
+        eyebrow={`Book ${book?.order ?? student.currentBook}`}
+        title="My lessons"
+        description={`You can study up to Lesson ${lessonLimit}.`}
+        actions={(
+          <StudentBookSelector books={books} value={book?.id ?? ""} onChange={onSelectBook} />
+        )}
+      />
       {practiceUrl ? (
         <Card className="book-practice-banner">
           <CardContent>
@@ -2829,10 +2948,10 @@ function StudentLessons({
       ) : null}
       <div className={"student-lessons-layout" + (mobileLessonFocused ? " mobile-lesson-focused" : "")}>
         <Card className="lesson-picker-card">
-          <CardHeader><CardTitle>Book {book?.order ?? student.currentBook}</CardTitle><p>{Math.min(student.currentLesson, lessons.filter((lesson) => lesson.status === "published").length)} lessons available</p></CardHeader>
+          <CardHeader><CardTitle>Book {book?.order ?? student.currentBook}</CardTitle><p>{Math.min(lessonLimit, lessons.filter((lesson) => lesson.status === "published").length)} lessons available</p></CardHeader>
           <CardContent className="student-lesson-picker">
             {lessons.map((lesson) => {
-              const unlocked = lesson.order <= student.currentLesson && lesson.status === "published";
+              const unlocked = lesson.order <= lessonLimit && lesson.status === "published";
               return (
                 <button key={lesson.id} disabled={!unlocked} className={selectedLesson?.id === lesson.id ? "active" : ""} onClick={() => unlocked && selectLesson(lesson.id)}>
                   <span className="lesson-number">{lesson.order}</span>
@@ -2874,30 +2993,40 @@ function StudentLessons({
 
 function StudentHomework({
   book,
+  books,
   lesson,
   lessons,
   questions,
   answers,
   revealedAnswers,
   completed,
+  onSelectBook,
   onSelectLesson,
   onAnswer,
   onReveal,
 }: {
   book?: BookSummary;
+  books: BookSummary[];
   lesson?: LessonSummary;
   lessons: LessonSummary[];
   questions: HomeworkQuestion[];
   answers: Record<string, string>;
   revealedAnswers: Record<string, boolean>;
   completed: number;
+  onSelectBook: (bookId: string) => void;
   onSelectLesson: (lessonId: string) => void;
   onAnswer: (questionId: string, answer: string) => void;
   onReveal: (questionId: string) => void;
 }) {
   return (
     <section className="content-section homework-page">
-      <PageHeading eyebrow={`Book ${book?.order ?? 1} · Lesson ${lesson?.order ?? 1}`} title="Homework" />
+      <PageHeading
+        eyebrow={`Book ${book?.order ?? 1} · Lesson ${lesson?.order ?? 1}`}
+        title="Homework"
+        actions={(
+          <StudentBookSelector books={books} value={book?.id ?? ""} onChange={onSelectBook} />
+        )}
+      />
       <div className="homework-lesson-switcher">
         <div className="homework-switcher-copy">
           <span><BookOpenText /></span>
@@ -3296,6 +3425,128 @@ function EditHomeworkDialog({
   );
 }
 
+function StudentBookSelector({
+  books,
+  value,
+  onChange,
+}: {
+  books: BookSummary[];
+  value: string;
+  onChange: (bookId: string) => void;
+}) {
+  return (
+    <div className="student-book-switcher">
+      <Label htmlFor="student-book-switcher">Choose a book</Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger
+          id="student-book-switcher"
+          className="student-book-select"
+          aria-label="Choose a book"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {books.map((book) => (
+            <SelectItem value={book.id} key={book.id}>
+              Book {book.order}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function BookAccessEditor({
+  books,
+  lessons,
+  value,
+  onChange,
+  idPrefix,
+}: {
+  books: BookSummary[];
+  lessons: LessonSummary[];
+  value: Record<string, number>;
+  onChange: (value: Record<string, number>) => void;
+  idPrefix: string;
+}) {
+  function toggleBook(book: BookSummary, checked: boolean) {
+    if (checked) {
+      const firstLesson = lessons
+        .filter((lesson) => lesson.bookId === book.id)
+        .sort((a, b) => a.order - b.order)[0];
+      onChange({ ...value, [book.id]: firstLesson?.order ?? 1 });
+      return;
+    }
+    const nextValue = { ...value };
+    delete nextValue[book.id];
+    onChange(nextValue);
+  }
+
+  return (
+    <div className="book-access-editor">
+      <div className="book-access-heading">
+        <strong>Livros liberados</strong>
+        <span>Marque somente os livros que este aluno poderá acessar. O mais avançado será aberto primeiro.</span>
+      </div>
+      <div className="book-access-list">
+        {books.map((book) => {
+          const checked = value[book.id] !== undefined;
+          const bookLessons = lessons
+            .filter((lesson) => lesson.bookId === book.id)
+            .sort((a, b) => a.order - b.order);
+          const fallbackLesson = bookLessons[0]?.order ?? 1;
+          return (
+            <div className={`book-access-row ${checked ? "selected" : ""}`} key={book.id}>
+              <label className="book-access-choice" htmlFor={`${idPrefix}-${book.id}`}>
+                <input
+                  id={`${idPrefix}-${book.id}`}
+                  name="bookAccess"
+                  type="checkbox"
+                  value={book.id}
+                  checked={checked}
+                  onChange={(event) => toggleBook(book, event.target.checked)}
+                />
+                <span>
+                  <strong>Livro {book.order}</strong>
+                  <small>{book.title}</small>
+                </span>
+              </label>
+              <div className="book-access-limit">
+                <Label htmlFor={`${idPrefix}-${book.id}-lesson`}>Liberar até</Label>
+                <select
+                  id={`${idPrefix}-${book.id}-lesson`}
+                  name={`bookLesson:${book.id}`}
+                  className="native-select"
+                  value={String(value[book.id] ?? fallbackLesson)}
+                  onChange={(event) => onChange({
+                    ...value,
+                    [book.id]: Number(event.target.value),
+                  })}
+                  disabled={!checked}
+                >
+                  {bookLessons.length > 0 ? bookLessons.map((lesson) => (
+                    <option value={lesson.order} key={lesson.id}>Lesson {lesson.order}</option>
+                  )) : (
+                    <option value="1">Lesson 1</option>
+                  )}
+                </select>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {Object.keys(value).length === 0 ? (
+        <p className="book-access-warning">Selecione pelo menos um livro.</p>
+      ) : (
+        <p className="book-access-summary">
+          {Object.keys(value).length} {Object.keys(value).length === 1 ? "livro liberado" : "livros liberados"}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function NewStudentDialog({
   open,
   onOpenChange,
@@ -3309,19 +3560,19 @@ function NewStudentDialog({
   lessons: LessonSummary[];
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const [bookId, setBookId] = useState(books[0]?.id ?? "");
-  const selectedBookId = books.some((book) => book.id === bookId)
-    ? bookId
-    : books[0]?.id ?? "";
-  const bookLessons = lessons
-    .filter((lesson) => lesson.bookId === selectedBookId)
-    .sort((a, b) => a.order - b.order);
+  const [bookAccess, setBookAccess] = useState<Record<string, number>>(() => {
+    const firstBook = books[0];
+    const firstLesson = lessons
+      .filter((lesson) => lesson.bookId === firstBook?.id)
+      .sort((a, b) => a.order - b.order)[0];
+    return firstBook ? { [firstBook.id]: firstLesson?.order ?? 1 } : {};
+  });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={onSubmit}>
+      <DialogContent className="student-dialog-content">
+        <form className="student-dialog-layout" onSubmit={onSubmit}>
           <DialogHeader><DialogTitle>Novo aluno</DialogTitle></DialogHeader>
-          <div className="dialog-form">
+          <div className="dialog-form student-dialog-scroll">
             <div className="student-account-note">
               <div>
                 <strong>Crie primeiro a conta de acesso no Firebase</strong>
@@ -3339,10 +3590,13 @@ function NewStudentDialog({
             </div>
             <div className="field-stack"><Label htmlFor="student-name">Nome</Label><Input id="student-name" name="name" placeholder="Nome completo" required /></div>
             <div className="field-stack"><Label htmlFor="student-email">E-mail de acesso</Label><Input id="student-email" name="email" type="email" placeholder="aluno@email.com" required /></div>
-            <div className="form-grid two">
-              <div className="field-stack"><Label htmlFor="student-book">Livro</Label><select id="student-book" name="book" className="native-select" value={selectedBookId} onChange={(event) => setBookId(event.target.value)}>{books.map((book) => <option value={book.id} key={book.id}>{book.title}</option>)}</select></div>
-              <div className="field-stack"><Label htmlFor="student-lesson">Lição</Label><select key={selectedBookId} id="student-lesson" name="lesson" className="native-select" defaultValue={String(bookLessons[0]?.order ?? 1)}>{bookLessons.map((lesson) => <option value={lesson.order} key={lesson.id}>Lesson {lesson.order}</option>)}</select></div>
-            </div>
+            <BookAccessEditor
+              books={books}
+              lessons={lessons}
+              value={bookAccess}
+              onChange={setBookAccess}
+              idPrefix="new-student"
+            />
           </div>
           <DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button><Button type="submit"><UserPlus /> Vincular aluno</Button></DialogFooter>
         </form>

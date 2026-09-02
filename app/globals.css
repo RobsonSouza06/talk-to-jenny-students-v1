@@ -1732,6 +1732,150 @@ body.lesson-presentation-open {
   padding: 1rem 0;
 }
 
+.student-dialog-content {
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+}
+
+.student-dialog-layout {
+  display: flex;
+  min-height: 0;
+  max-height: calc(100dvh - 5rem);
+  flex-direction: column;
+}
+
+.student-dialog-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.35rem;
+  scrollbar-gutter: stable;
+}
+
+.student-dialog-layout [data-slot="dialog-header"],
+.student-dialog-layout [data-slot="dialog-footer"] {
+  flex: 0 0 auto;
+}
+
+.book-access-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+}
+
+.book-access-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.book-access-heading strong {
+  color: #153a57;
+  font-size: 0.75rem;
+}
+
+.book-access-heading span,
+.book-access-summary,
+.book-access-warning {
+  color: var(--muted-foreground);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.book-access-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.book-access-row {
+  display: grid;
+  gap: 0.65rem;
+  border: 1px solid #dbe5ed;
+  border-radius: 0.78rem;
+  background: #f8fafc;
+  padding: 0.7rem;
+  transition: 150ms ease;
+}
+
+.book-access-row.selected {
+  border-color: #8db7d2;
+  background: #f0f7fb;
+  box-shadow: 0 0 0 1px rgba(0, 63, 112, 0.05);
+}
+
+.book-access-choice {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+  cursor: pointer;
+}
+
+.book-access-choice input {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
+  accent-color: #003f70;
+}
+
+.book-access-choice > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.book-access-choice strong {
+  color: #153a57;
+  font-size: 0.74rem;
+}
+
+.book-access-choice small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-access-limit {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.book-access-limit label {
+  color: #31536b;
+  font-size: 0.66rem;
+  font-weight: 750;
+}
+
+.book-access-limit .native-select {
+  min-width: 0;
+  height: 2.15rem;
+  border-radius: 0.55rem;
+  background: #fff;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.book-access-limit .native-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.book-access-summary {
+  color: #16704e;
+  font-weight: 800;
+}
+
+.book-access-warning {
+  color: #a1161d;
+  font-weight: 800;
+}
+
 .block-dialog-content {
   min-width: 0;
   max-height: calc(100dvh - 2rem);
@@ -1807,6 +1951,28 @@ body.lesson-presentation-open {
 .student-account-note span {
   color: var(--muted-foreground);
   font-size: 0.66rem;
+}
+
+.student-book-switcher {
+  display: flex;
+  width: min(100%, 18rem);
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.student-book-switcher label {
+  color: #31536b;
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.student-book-select {
+  width: 100%;
+  min-height: 2.65rem;
+  border-color: #afc8d9;
+  background: #fff;
+  color: #123a59;
+  font-weight: 800;
 }
 
 .dialog-footer-split {
@@ -3016,6 +3182,11 @@ body.lesson-presentation-open {
 
   .form-grid.two {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .book-access-row {
+    grid-template-columns: minmax(0, 1fr) minmax(9rem, 0.7fr);
+    align-items: center;
   }
 
   .book-progress-visual {

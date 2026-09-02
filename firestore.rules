@@ -45,10 +45,34 @@ service cloud.firestore {
       return /databases/$(database)/documents/books/$(bookId)/lessons/$(lessonId);
     }
 
-    function canReadBookData(book) {
+    function usesExplicitBookAccess(student) {
+      return student.get("bookAccess", 0) is map;
+    }
+
+    function hasExplicitBookAccess(student, bookId) {
+      let access = student.get("bookAccess", {});
+      return access is map
+        && access.keys().hasAny([bookId])
+        && access[bookId] is int
+        && access[bookId] > 0;
+    }
+
+    function canReadBookData(bookId, book) {
       return hasActiveStudentProfile(request.auth.uid)
         && book.published == true
-        && book.order <= get(studentPath(request.auth.uid)).data.currentBook;
+        && (
+          hasExplicitBookAccess(
+            get(studentPath(request.auth.uid)).data,
+            bookId
+          )
+          || (
+            !usesExplicitBookAccess(
+              get(studentPath(request.auth.uid)).data
+            )
+            && book.order
+              <= get(studentPath(request.auth.uid)).data.currentBook
+          )
+        );
     }
 
     function canReadLessonData(bookId, lesson) {
@@ -56,13 +80,28 @@ service cloud.firestore {
         && get(bookPath(bookId)).data.published == true
         && lesson.published == true
         && (
-          get(bookPath(bookId)).data.order
-            < get(studentPath(request.auth.uid)).data.currentBook
-          || (
-            get(bookPath(bookId)).data.order
-              == get(studentPath(request.auth.uid)).data.currentBook
+          (
+            hasExplicitBookAccess(
+              get(studentPath(request.auth.uid)).data,
+              bookId
+            )
             && lesson.order
-              <= get(studentPath(request.auth.uid)).data.currentLesson
+              <= get(studentPath(request.auth.uid)).data.get("bookAccess", {})[bookId]
+          )
+          || (
+            !usesExplicitBookAccess(
+              get(studentPath(request.auth.uid)).data
+            )
+            && (
+              get(bookPath(bookId)).data.order
+                < get(studentPath(request.auth.uid)).data.currentBook
+              || (
+                get(bookPath(bookId)).data.order
+                  == get(studentPath(request.auth.uid)).data.currentBook
+                && lesson.order
+                  <= get(studentPath(request.auth.uid)).data.currentLesson
+              )
+            )
           )
         );
     }
@@ -164,7 +203,7 @@ service cloud.firestore {
     }
 
     match /books/{bookId} {
-      allow read: if isTeacher() || canReadBookData(resource.data);
+      allow read: if isTeacher() || canReadBookData(bookId, resource.data);
       allow create, update, delete: if isTeacher();
 
       match /lessons/{lessonId} {
