@@ -104,9 +104,32 @@ export type AuditLog = {
   actorUid: string;
 };
 
+const FIREBASE_ACTION_TIMEOUT_MS = 15_000;
+
+function withFirebaseTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error("firebase-operation-timeout"));
+    }, FIREBASE_ACTION_TIMEOUT_MS);
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function signIn(email: string, password: string) {
-  await waitForAuthPersistence();
-  return signInWithEmailAndPassword(firebaseAuth(), email, password);
+  return withFirebaseTimeout(
+    waitForAuthPersistence().then(() =>
+      signInWithEmailAndPassword(firebaseAuth(), email, password),
+    ),
+  );
 }
 
 export async function signOutCurrentUser() {
@@ -114,7 +137,7 @@ export async function signOutCurrentUser() {
 }
 
 export async function requestPasswordReset(email: string) {
-  await sendPasswordResetEmail(firebaseAuth(), email);
+  await withFirebaseTimeout(sendPasswordResetEmail(firebaseAuth(), email));
 }
 
 export function observeAuth(
@@ -156,15 +179,19 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
 }
 
 export async function loadTeacherWorkspace(): Promise<WorkspaceData> {
-  await purgeExpiredTrash();
   const books = await loadBooksForTeacher();
-  const [lessons, students, trashItems, auditLogs] = await Promise.all([
+  const [lessons, students] = await Promise.all([
     loadLessonsForTeacher(books),
     loadStudentsForTeacher(),
-    loadTrashItems(),
-    loadAuditLogs(),
   ]);
-  return { books, lessons, students, attempts: {}, trashItems, auditLogs };
+  return {
+    books,
+    lessons,
+    students,
+    attempts: {},
+    trashItems: [],
+    auditLogs: [],
+  };
 }
 
 export async function loadStudentWorkspace(uid: string): Promise<WorkspaceData> {
@@ -218,7 +245,7 @@ export async function loadStudentWorkspace(uid: string): Promise<WorkspaceData> 
     }),
   );
   const attempts = await loadStudentAttempts(uid);
-  await updateLastAccess(uid);
+  void updateLastAccess(uid).catch(() => undefined);
   return {
     books,
     lessons: lessonGroups.flat().sort(byBookAndOrder),
@@ -264,21 +291,23 @@ async function loadLessonsForTeacher(books: BookSummary[]) {
 
 async function loadStudentsForTeacher() {
   const snapshot = await getDocs(collection(firebaseDb(), "students"));
-  return Promise.all(
-    snapshot.docs.map(async (item) => {
+  return snapshot.docs
+    .map((item) => studentFromSnapshot(item.id, item.data()))
+    .filter((student) => student.active)
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+}
+
+export async function loadStudentAnswerCounts(studentIds: string[]) {
+  const db = firebaseDb();
+  const entries = await Promise.all(
+    studentIds.map(async (studentId) => {
       const count = await getCountFromServer(
-        collection(firebaseDb(), "students", item.id, "attempts"),
+        collection(db, "students", studentId, "attempts"),
       );
-      return {
-        ...studentFromSnapshot(item.id, item.data()),
-        answered: count.data().count,
-      };
+      return [studentId, count.data().count] as const;
     }),
-  ).then((students) =>
-    students
-      .filter((student) => student.active)
-      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
   );
+  return Object.fromEntries(entries);
 }
 
 export async function saveBook(book: BookSummary) {

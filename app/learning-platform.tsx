@@ -116,6 +116,7 @@ import {
   deleteStudentPermanently,
   loadAuditLogs,
   loadStudentAttempts,
+  loadStudentAnswerCounts,
   loadStudentWorkspace,
   loadTeacherWorkspace,
   loadTrashItems,
@@ -123,6 +124,7 @@ import {
   moveHomeworkQuestionToTrash,
   moveLessonToTrash,
   observeAuth,
+  purgeExpiredTrash,
   purgeTrashItem,
   requestPasswordReset,
   restoreTrashItem,
@@ -304,31 +306,83 @@ const studentNavigation: Array<{ id: StudentView; label: string; icon: LucideIco
 ];
 
 const publicBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const STARTUP_TIMEOUT_MS = 12_000;
+const AUTH_TIMEOUT_MS = 15_000;
+
+function withStartupTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error("startup-timeout"));
+    }, STARTUP_TIMEOUT_MS);
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function loadWithRetry<T>(operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await withStartupTimeout(operation());
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 450));
+      }
+    }
+  }
+  throw lastError;
+}
 
 export function LearningPlatform() {
   const [session, setSession] = useState<FirebaseSession | null>(null);
   const [authLoading, setAuthLoading] = useState(isFirebaseConfigured);
   const [authError, setAuthError] = useState("");
+  const [authRetryKey, setAuthRetryKey] = useState(0);
 
   useEffect(() => {
     if (!isFirebaseConfigured) {
       return;
     }
-    return observeAuth((nextSession, error) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      setAuthError("A conexão demorou mais que o esperado. Tente novamente.");
+      setAuthLoading(false);
+    }, AUTH_TIMEOUT_MS);
+    const unsubscribe = observeAuth((nextSession, error) => {
+      globalThis.clearTimeout(timeoutId);
       setSession(nextSession);
       setAuthError(error?.message ?? "");
       setAuthLoading(false);
     });
-  }, []);
+    return () => {
+      globalThis.clearTimeout(timeoutId);
+      unsubscribe();
+    };
+  }, [authRetryKey]);
+
+  function retryAuthentication() {
+    setSession(null);
+    setAuthError("");
+    setAuthLoading(true);
+    setAuthRetryKey((current) => current + 1);
+  }
 
   if (!isFirebaseConfigured) {
     return <ConfigurationMissing />;
   }
   if (authLoading) {
-    return <AppLoading />;
+    return <AppLoading message="Conectando com segurança..." />;
   }
   if (!session) {
-    return <LoginScreen accessError={authError} />;
+    return <LoginScreen accessError={authError} onRetry={retryAuthentication} />;
   }
   return <LearningWorkspace session={session} />;
 }
@@ -345,6 +399,7 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const [workspaceError, setWorkspaceError] = useState("");
+  const [workspaceRetryKey, setWorkspaceRetryKey] = useState(0);
   const [activeStudentId, setActiveStudentId] = useState(
     accountRole === "student" ? session.user.uid : "",
   );
@@ -375,9 +430,11 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
       setWorkspaceLoading(true);
       setWorkspaceError("");
       try {
-        const data = accountRole === "teacher"
-          ? await loadTeacherWorkspace()
-          : await loadStudentWorkspace(session.user.uid);
+        const data = await loadWithRetry(() => (
+          accountRole === "teacher"
+            ? loadTeacherWorkspace()
+            : loadStudentWorkspace(session.user.uid)
+        ));
         if (cancelled) return;
         setBooks(data.books);
         setLessons(data.lessons);
@@ -403,10 +460,38 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
         const attemptState = studentAttemptState(data.attempts);
         setAnswers(attemptState.answers);
         setRevealedAnswers(attemptState.revealedAnswers);
+        if (accountRole === "teacher") {
+          void loadStudentAnswerCounts(data.students.map((student) => student.id))
+            .then((answerCounts) => {
+              if (cancelled) return;
+              setStudents((current) => current.map((student) => ({
+                ...student,
+                answered: answerCounts[student.id] ?? student.answered,
+              })));
+            })
+            .catch(() => undefined);
+          void (async () => {
+            try {
+              await purgeExpiredTrash();
+              const [nextTrashItems, nextAuditLogs] = await Promise.all([
+                loadTrashItems(),
+                loadAuditLogs(),
+              ]);
+              if (cancelled) return;
+              setTrashItems(nextTrashItems);
+              setAuditLogs(nextAuditLogs);
+            } catch {
+              // A área principal continua disponível se os dados de proteção atrasarem.
+            }
+          })();
+        }
       } catch (error) {
         if (!cancelled) {
+          const message = error instanceof Error ? error.message : "";
           setWorkspaceError(
-            error instanceof Error ? error.message : "Não foi possível carregar os dados.",
+            message === "startup-timeout"
+              ? "A conexão com o Firebase demorou mais que o esperado. Verifique a internet e tente novamente."
+              : message || "Não foi possível carregar os dados.",
           );
         }
       } finally {
@@ -417,16 +502,21 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
     return () => {
       cancelled = true;
     };
-  }, [accountRole, session.user.uid]);
+  }, [accountRole, session.user.uid, workspaceRetryKey]);
 
   if (workspaceLoading) {
-    return <AppLoading />;
+    return <AppLoading message="Carregando seus dados..." />;
   }
   if (workspaceError) {
     return (
       <AccessState
         title="Não foi possível abrir o aplicativo"
         message={workspaceError}
+        onRetry={() => {
+          setWorkspaceError("");
+          setWorkspaceLoading(true);
+          setWorkspaceRetryKey((current) => current + 1);
+        }}
         onExit={signOutCurrentUser}
       />
     );
@@ -1842,20 +1932,36 @@ function LearningWorkspace({ session }: { session: FirebaseSession }) {
   );
 }
 
-function LoginScreen({ accessError = "" }: { accessError?: string }) {
+function LoginScreen({
+  accessError = "",
+  onRetry,
+}: {
+  accessError?: string;
+  onRetry?: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(accessError);
+  const [connectionIssue, setConnectionIssue] = useState(
+    accessError.toLowerCase().includes("conexão")
+      || accessError.toLowerCase().includes("network"),
+  );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setMessage("");
+    setConnectionIssue(false);
     try {
       await signIn(email.trim(), password);
-    } catch {
-      setMessage("E-mail ou senha inválidos.");
+    } catch (error) {
+      const timedOut = error instanceof Error
+        && error.message === "firebase-operation-timeout";
+      setConnectionIssue(timedOut);
+      setMessage(timedOut
+        ? "A conexão demorou mais que o esperado. Verifique a internet e tente novamente."
+        : "E-mail ou senha inválidos.");
     } finally {
       setSubmitting(false);
     }
@@ -1908,6 +2014,11 @@ function LoginScreen({ accessError = "" }: { accessError?: string }) {
               />
             </div>
             {message ? <p className="auth-error">{message}</p> : null}
+            {connectionIssue && onRetry ? (
+              <Button type="button" variant="outline" onClick={onRetry}>
+                <RotateCcw /> Tentar novamente
+              </Button>
+            ) : null}
             <Button type="submit" disabled={submitting}>
               {submitting ? "Entrando..." : "Entrar"}
             </Button>
@@ -1927,12 +2038,13 @@ function LoginScreen({ accessError = "" }: { accessError?: string }) {
   );
 }
 
-function AppLoading() {
+function AppLoading({ message = "Carregando..." }: { message?: string }) {
   return (
     <main className="auth-shell">
       <div className="app-loading">
         <Brand />
         <span className="loading-dot" />
+        <p>{message}</p>
       </div>
     </main>
   );
@@ -1941,10 +2053,12 @@ function AppLoading() {
 function AccessState({
   title,
   message,
+  onRetry,
   onExit,
 }: {
   title: string;
   message: string;
+  onRetry?: () => void;
   onExit: () => Promise<void>;
 }) {
   return (
@@ -1956,9 +2070,16 @@ function AccessState({
             <LockKeyhole />
             <h1>{title}</h1>
             <p>{message}</p>
-            <Button onClick={() => void onExit()}>
-              <LogOut /> Sair
-            </Button>
+            <div className="access-state-actions">
+              {onRetry ? (
+                <Button onClick={onRetry}>
+                  <RotateCcw /> Tentar novamente
+                </Button>
+              ) : null}
+              <Button variant={onRetry ? "outline" : "default"} onClick={() => void onExit()}>
+                <LogOut /> Sair
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
